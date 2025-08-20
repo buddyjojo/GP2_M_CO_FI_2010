@@ -1,0 +1,7 @@
+config MSTAR_CEC
+
+tristate "CEC"
+
+help
+    Titania3 CEC driver function
+

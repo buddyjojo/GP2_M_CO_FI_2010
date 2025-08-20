@@ -1,0 +1,10 @@
+config MSTAR_VE
+
+tristate TVEncoder
+	# dhjung LGE
+	depends on MSTAR_DRIVER
+	# dhjung LGE
+	default n
+	help
+		Enable compilation option for driver TVEncoder
+

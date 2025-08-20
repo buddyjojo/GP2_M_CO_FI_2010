@@ -1,0 +1,9 @@
+config MSTAR_TSP
+
+tristate "TSP"
+	# dhjung LGE
+	depends on MSTAR_DRIVER
+	select CRC32
+	# dhjung LGE
+	default n
+	help

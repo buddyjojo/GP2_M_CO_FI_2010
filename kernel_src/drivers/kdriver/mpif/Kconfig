@@ -1,0 +1,9 @@
+config MSTAR_MPIF
+
+tristate "MPIF"
+	# dhjung LGe
+	depends on MSTAR_DRIVER
+	select CRC32
+	# dhjung LGe
+	default n
+	help

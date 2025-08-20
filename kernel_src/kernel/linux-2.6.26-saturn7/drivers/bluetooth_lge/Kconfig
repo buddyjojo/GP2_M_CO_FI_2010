@@ -1,0 +1,6 @@
+
+menu "Bluetooth Support by LGE"
+
+source "drivers/bluetooth_lge/csr/Kconfig"
+
+endmenu

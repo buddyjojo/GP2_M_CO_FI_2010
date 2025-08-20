@@ -1,0 +1,8 @@
+config MSTAR_NAND
+	tristate "NAND"
+	# dhjung LGE
+	depends on MSTAR_DRIVER
+	# dhjung LGE
+	default n
+	help
+		Support Mstar Nand Flash Driver

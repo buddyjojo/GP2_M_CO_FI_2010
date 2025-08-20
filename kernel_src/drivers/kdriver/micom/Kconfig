@@ -1,0 +1,10 @@
+config MSTAR_MICOM
+
+tristate "MICOM"
+	# dhjung LGE
+	depends on MSTAR_DRIVER
+	# dhjung LGE
+	default y
+	help
+    	Titania MICOM driver function
+    

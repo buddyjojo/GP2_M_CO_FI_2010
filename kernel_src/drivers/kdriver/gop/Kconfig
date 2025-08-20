@@ -1,0 +1,10 @@
+config MSTAR_GOP
+
+tristate "GOP"
+	# dhjung LGE
+	depends on MSTAR_DRIVER
+	# dhjung LGE
+	default n
+	help
+		Enable compilation option for driver GOP
+

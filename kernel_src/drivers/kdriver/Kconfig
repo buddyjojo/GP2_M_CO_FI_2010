@@ -1,0 +1,202 @@
+# drivers/MStar/Kconfig
+
+menu "MStar Platform Configuration"
+
+# dhjung LGE
+config MSTAR_DRIVER
+	tristate "MStar Driver Support"
+
+#===================================================
+# MStar Chip Selection
+#===================================================
+choice
+	prompt "MStar Chip Selection"
+	default None
+
+config MSTAR_NONE
+	bool "None"
+
+config MSTAR_TITANIA
+	bool "Titania"
+	select BOOT_ELF32
+	select DMA_NONCOHERENT
+	select MIPS_BOARDS_GEN
+	select CEVT_R4K
+	select CSRC_R4K
+	select IRQ_CPU
+	select SYS_HAS_CPU_MIPS32_R1
+	select SYS_HAS_CPU_MIPS32_R2
+	select SYS_HAS_EARLY_PRINTK
+	select SYS_SUPPORTS_32BIT_KERNEL
+	select SYS_SUPPORTS_BIG_ENDIAN
+	select SYS_SUPPORTS_LITTLE_ENDIAN
+	select SYS_SUPPORTS_MULTITHREADING
+
+config MSTAR_TRITON
+	bool "Triton"
+	select BOOT_ELF32
+	select DMA_NONCOHERENT
+	select MIPS_BOARDS_GEN
+	select CEVT_R4K
+	select CSRC_R4K
+	select IRQ_CPU
+	select SYS_HAS_CPU_MIPS32_R1
+	select SYS_HAS_CPU_MIPS32_R2
+	select SYS_HAS_EARLY_PRINTK
+	select SYS_SUPPORTS_32BIT_KERNEL
+	select SYS_SUPPORTS_BIG_ENDIAN
+	select SYS_SUPPORTS_LITTLE_ENDIAN
+	select SYS_SUPPORTS_MULTITHREADING
+
+config MSTAR_TITANIA2
+	bool "Titania2"
+	select BOOT_ELF32
+	select DMA_NONCOHERENT
+	select MIPS_BOARDS_GEN
+	select CEVT_R4K
+	select CSRC_R4K
+	select IRQ_CPU
+	select SYS_HAS_CPU_MIPS32_R1
+	select SYS_HAS_CPU_MIPS32_R2
+	select SYS_HAS_EARLY_PRINTK
+	select SYS_SUPPORTS_32BIT_KERNEL
+	select SYS_SUPPORTS_BIG_ENDIAN
+	select SYS_SUPPORTS_LITTLE_ENDIAN
+	select SYS_SUPPORTS_MULTITHREADING
+
+config MSTAR_TITANIA3
+	bool "Titania3"
+	select BOOT_ELF32
+	select DMA_NONCOHERENT
+	select MIPS_BOARDS_GEN
+	select CEVT_R4K
+	select CSRC_R4K
+	select IRQ_CPU
+	select SYS_HAS_CPU_MIPS32_R1
+	select SYS_HAS_CPU_MIPS32_R2
+	select SYS_HAS_EARLY_PRINTK
+	select SYS_SUPPORTS_32BIT_KERNEL
+	select SYS_SUPPORTS_BIG_ENDIAN
+	select SYS_SUPPORTS_LITTLE_ENDIAN
+	select SYS_SUPPORTS_MULTITHREADING
+	select HIGHMEM
+	select SYS_SUPPORTS_HIGHMEM
+	select CPU_HAS_SYNC
+
+endchoice
+
+#===================================================
+# MStar Chip (auto-select)
+# 0: None
+# 1: Titania
+# 2: Triton
+# 3: Titania2
+# 4: Titania3
+#===================================================
+config MSTAR_CHIP_TYPE
+	int
+	default 1 if MSTAR_TITANIA
+	default 2 if MSTAR_TRITON
+	default 3 if MSTAR_TITANIA2
+    default 4 if MSTAR_TITANIA3
+	default 0
+
+#===================================================
+# MStar Chip Name (auto-select)
+#===================================================
+config MSTAR_CHIP_NAME
+	string
+	default "titania" if MSTAR_TITANIA
+	default "triton" if MSTAR_TRITON
+	default "titania2" if MSTAR_TITANIA2
+    default "titania3" if MSTAR_TITANIA3
+	default "error"
+
+#===================================================
+# FIXME: remove this later - cc.chen
+#===================================================
+config Titania
+	bool
+	default y if MSTAR_TITANIA
+
+config Triton
+	bool
+	default y if MSTAR_TRITON
+
+config Titania2
+	bool
+	default y if MSTAR_TITANIA2
+
+config Titania3
+	bool
+	default y if MSTAR_TITANIA3
+
+#===================================================
+# MStar Device Drivers
+#===================================================
+comment "MStar Device Drivers"
+
+if !MSTAR_NONE
+#==========================================
+# Remove this latter - cc.chen
+#==========================================
+source "drivers/mstar/Kconfig-Board"
+source "drivers/mstar/Kconfig-MMap"
+
+config MSTAR_TITANIA_BD_T2_LG_256MDDR_BOARD
+	bool "Select 256M DDR"
+	default n
+
+#===================================================
+# MStar DTV Device Driver
+#===================================================
+source "drivers/mstar/nand/Kconfig"
+source "drivers/mstar/tsp/Kconfig"
+source "drivers/mstar/ge/Kconfig"
+source "drivers/mstar/gop/Kconfig"
+source "drivers/mstar/mpool/Kconfig"
+source "drivers/mstar/iic/Kconfig"
+source "drivers/mstar/gpio/Kconfig"
+source "drivers/mstar/pwm/Kconfig"
+source "drivers/mstar/emac/Kconfig"
+source "drivers/mstar/system/Kconfig"
+source "drivers/mstar/scaler/Kconfig"
+#source "drivers/mstar/miu/Kconfig"
+source "drivers/mstar/mad/Kconfig"
+source "drivers/mstar/vd/Kconfig"
+source "drivers/mstar/mvop/Kconfig"
+source "drivers/mstar/mvd/Kconfig"
+source "drivers/mstar/h264/Kconfig"
+source "drivers/mstar/ir/Kconfig"
+#source "drivers/mstar/8051/Kconfig"
+source "drivers/mstar/micom/Kconfig"
+source "drivers/mstar/ci/Kconfig"
+#source "drivers/mstar/aeon/Kconfig"
+#source "drivers/mstar/rld/Kconfig"
+source "drivers/mstar/ttx/Kconfig"
+#source "drivers/mstar/mlink/Kconfig"
+source "drivers/mstar/ve/Kconfig"
+source "drivers/mstar/cc/Kconfig"
+source "drivers/mstar/jpeg/Kconfig"
+#source "drivers/mstar/fbdev/Kconfig"
+source "drivers/mstar/msmailbox/Kconfig"
+#source "drivers/mstar/avs/Kconfig"
+source "drivers/mstar/spi/Kconfig"
+source "drivers/mstar/str/Kconfig"
+source "drivers/mstar/m4ve/Kconfig"
+source "drivers/mstar/dip/Kconfig"
+#source "drivers/mstar/rtc/Kconfig"
+#source "drivers/mstar/sar/Kconfig"
+source "drivers/mstar/cec/Kconfig"
+source "drivers/mstar/demod/Kconfig"
+#source "drivers/mstar/mfc/Kconfig"
+source "drivers/mstar/mpif/Kconfig"
+source "drivers/mstar/aesdma/Kconfig"
+source "drivers/mstar/bdma/Kconfig"
+source "drivers/mstar/pws/Kconfig"
+#source "drivers/mstar/logo/Kconfig"
+source "drivers/mstar/probe/Kconfig"
+
+endif
+
+endmenu

@@ -1,0 +1,2 @@
+   text	   data	    bss	    dec	    hex	filename
+   8192	      0	      0	   8192	   2000	out/boot.elf

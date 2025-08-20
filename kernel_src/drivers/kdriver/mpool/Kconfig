@@ -1,0 +1,10 @@
+config MSTAR_MPOOL
+
+tristate "MPOOL"
+	# dhjung LGE
+	depends on MSTAR_DRIVER
+	# dhjung LGE
+	default n
+	help
+    	MStar MPOOL driver function
+    

@@ -1,0 +1,10 @@
+config MSTAR_GPIO
+
+tristate "GPIO"
+	# dhjung LGE
+	depends on MSTAR_DRIVER
+	# dhjung LGE
+	default y
+	help
+    	MStar GPIO driver function
+

@@ -1,0 +1,7 @@
+config MSTAR_RTC
+
+tristate "RTC"
+
+help
+    Titania3 RTC driver function
+

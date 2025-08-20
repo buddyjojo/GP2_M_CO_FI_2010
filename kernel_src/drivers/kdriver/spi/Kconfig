@@ -1,0 +1,7 @@
+config MSTAR_SPI
+
+tristate "SPI"
+default y
+
+---help---
+Enable compilation option for driver SPI

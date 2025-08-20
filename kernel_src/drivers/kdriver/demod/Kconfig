@@ -1,0 +1,9 @@
+config MSTAR_DEMOD
+
+tristate "Demod"
+	# dhjung LGE
+	depends on MSTAR_DRIVER
+	# dhjung LGE
+	default n
+	help
+        MStar Demodulator driver function

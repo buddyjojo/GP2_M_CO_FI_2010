@@ -1,0 +1,7 @@
+config MSTAR_LOGO
+
+tristate "Logo"
+	# dhjung LGE
+	depends on MSTAR_DRIVER
+	# dhjung LGE
+	default y

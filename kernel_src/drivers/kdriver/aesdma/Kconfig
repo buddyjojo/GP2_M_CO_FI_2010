@@ -1,0 +1,5 @@
+config MSTAR_AESDMA
+tristate "AESDMA"
+	default n
+	help
+		Enable compilation option for driver AESDMA

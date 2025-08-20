@@ -1,0 +1,10 @@
+config MSTAR_IR
+
+tristate "IrDA"
+	# dhjung LGE
+	depends on MSTAR_DRIVER
+	# dhjung LGE
+	default n
+	help
+    	Titania IrDA driver function
+    

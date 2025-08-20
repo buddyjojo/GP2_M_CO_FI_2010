@@ -1,0 +1,5 @@
+config MSTAR_PWS
+tristate "PWS"
+	default n
+	help
+		Enable compilation option for driver PWS

@@ -1,0 +1,102 @@
+////////////////////////////////////////////////////////////////////////////////////////////
+// Copyright (c) 2006-2010 MStar Semiconductor, Inc.
+//
+// Unless otherwise stipulated in writing, any and all information contained herein
+// regardless in any format shall remain the property of MStar Semiconductor Inc.
+//
+// You can redistribute it and/or modify it under the terms of the GNU General Public
+// License version 2 as published by the Free Foundation. This program is distributed
+// in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the
+// implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+/////////////////////////////////////////////////////////////////////////////////////////////
+
+CC_PATH = /usr/toolchain/aeon/bin
+CC = $(CC_PATH)/aeon-gcc
+CPP = $(CC_PATH)/aeon-cpp
+AS = $(CC_PATH)/aeon-as
+LD = $(CC_PATH)/aeon-ld
+NM = $(CC_PATH)/aeon-nm
+OBJCP = $(CC_PATH)/aeon-objcopy
+OBJDUMP = $(CC_PATH)/aeon-objdump
+SZ = $(CC_PATH)/aeon-size
+CPPFLAGS = -DTSP_MEM_QMEM
+CCFLAGS = -Wall -c -O2 -DTSP_MEM_QMEM -o
+#CCFLAGS = -Wall -c -Os -DTSP_MEM_QMEM -o
+ASFLAGS =
+ECFLAGS =
+
+CHIP=Titania
+SRCDIR=./src
+INCDIR=./include
+OBJDIR=./obj
+BINDIR=./bin
+DRVDIR=./../..
+IMAGENAME=fwtsp_qmem
+TOOLS=rev32 rev32.exe bin2hex bin2hex.exe
+IMAGECARRAY=fw_tsp.dat
+
+LIBS = /usr/toolchain/aeon/lib/gcc/aeon/4.1.2/libgcc.a
+INCS = -I$(INCDIR)
+
+
+all:	setup fwtsp_qmem.or32
+
+drvtsp: setup fwtsp_qmem.or32
+	./bin2hex $(BINDIR)/$(IMAGENAME).EL.bin > $(IMAGECARRAY)
+
+fwtsp_qmem.or32: reset.o fw_tsp.o uart.o
+	$(LD) -Tfwtsp_qmem.ld -o $(BINDIR)/$@ \
+		$(OBJDIR)/reset.o \
+		$(OBJDIR)/fw_tsp.o \
+		$(OBJDIR)/uart.o $(LIBS)
+	$(OBJCP) -O binary $(BINDIR)/$@ $(BINDIR)/$(IMAGENAME).BL.bin
+	$(OBJDUMP) -t $(BINDIR)/$@ > $(BINDIR)/$(IMAGENAME).map
+	$(OBJDUMP) -S $(BINDIR)/$@ > $(BINDIR)/$(IMAGENAME).dis
+	$(OBJDUMP) -D $(BINDIR)/$@ > $(BINDIR)/$(IMAGENAME).lst
+	$(SZ) $(BINDIR)/$@
+	./rev32 $(BINDIR)/$(IMAGENAME).BL.bin $(BINDIR)/$(IMAGENAME).EL.bin
+
+fw_tsp.o: $(SRCDIR)/fw_tsp.c
+	$(CC) $(INCS) $(CCFLAGS) $(OBJDIR)/$@ $< $(ECFLAGS)
+
+reset.o: $(SRCDIR)/reset.s
+	$(CPP) $(INCS) $(CPPFLAGS) $< > $(OBJDIR)/$@.s
+	$(CC) $(INCS) $(CCFLAGS) $(OBJDIR)/$@ $(OBJDIR)/$@.s $(ECFLAGS)
+
+uart.o: $(SRCDIR)/uart.c
+	$(CC) $(INCS) $(CCFLAGS) $(OBJDIR)/$@ $< $(ECFLAGS)
+
+
+setup:
+	mkdir $(OBJDIR) 2> /dev/null; \
+	mkdir $(BINDIR) 2> /dev/null; \
+	gcc -O3 -o rev32 rev32.c
+	gcc -O3 -o bin2hex bin2hex.c
+	echo
+
+System.map: $(BINDIR)/$(IMAGENAME).or32
+	@$(NM) $< | \
+		grep -v '\(compiled\)\|\(\.o$$\)\|\( [aUw] \)\|\(\.\.ng$$\)\|\(LASH[RL]DI\)' | \
+		sort > $(BINDIR)/System.map
+
+
+#########################################################################
+clean:
+	find . -type f \
+		\( -name 'core' -o -name '*.bak' -o -name '*~' -o -name '*.hex'\
+		-o -name '*.o'  -o -name '*.a' -o -name '*.tmp' -o -name '*.code'\
+		-o -name '*.or32' -o -name '*.bin' -o -name '*.txt' -o -name '*.map' -o -name '*.bin2'\
+		-o -name '*.mem' -o -name '*.img' -o -name '*.out' -o -name '*.dis'\
+		-o -name '*.lst' -o -name '*.log' -o -name '*.exe' \) -print \
+		| xargs rm -f
+	rm -f System.map $(TOOLS) $(IMAGECARRAY) $(OBJDIR)/*
+
+distclean: clean
+	find . -type f \
+		\( -name .depend -o -name '*.srec' -o -name '*.bin' \
+		-o -name '*.pdf' \) \
+		-print | xargs rm -f
+	rm -f $(OBJS) *.bak tags TAGS
+	rm -fr *.*~
+
+

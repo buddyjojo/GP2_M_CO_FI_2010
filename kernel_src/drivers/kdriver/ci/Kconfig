@@ -1,0 +1,9 @@
+config MSTAR_CI
+	tristate "CI"
+	# dhjung LGE
+	depends on MSTAR_DRIVER
+	# dhjung LGE
+	default n
+	help
+		Enable compilation option for driver CI 
+

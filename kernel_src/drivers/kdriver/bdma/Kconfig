@@ -1,0 +1,7 @@
+config MSTAR_BDMA
+
+tristate "BDMA"
+	depends on MSTAR_DRIVER
+	default n
+	help
+        MStar Byte DMA driver function

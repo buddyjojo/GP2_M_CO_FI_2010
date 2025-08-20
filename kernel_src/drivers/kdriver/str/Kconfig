@@ -1,0 +1,10 @@
+config MSTAR_STR
+
+tristate "STR"
+	# dhjung LGE
+	depends on MSTAR_DRIVER
+	# dhjung LGE
+	default n
+	help
+    	enable MStar suspend to RAM feature
+    

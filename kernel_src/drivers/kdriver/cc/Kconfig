@@ -1,0 +1,9 @@
+config MSTAR_CC
+tristate "CC"
+	# dhjung LGE
+	depends on MSTAR_DRIVER
+	# dhjung LGE
+	default n
+	help
+    	enable MStar CC driver.
+

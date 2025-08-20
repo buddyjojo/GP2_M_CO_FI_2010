@@ -1,0 +1,11 @@
+config MSTAR_PROBE
+
+tristate "PROBE"
+	# dhjung LGE
+	depends on MSTAR_DRIVER
+#    depends on
+	# dhjung LGE
+	default y
+	help
+    	enable MStar PROBE feature
+

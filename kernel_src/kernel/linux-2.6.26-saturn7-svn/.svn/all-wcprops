@@ -1,0 +1,23 @@
+K 25
+svn:wc:ra_dav:version-url
+V 74
+/gp2/!svn/ver/30021/trunk/os/saturn7_linux/kernel/linux-2.6.26-saturn7-svn
+END
+config-flash
+K 25
+svn:wc:ra_dav:version-url
+V 87
+/gp2/!svn/ver/16170/trunk/os/saturn7_linux/kernel/linux-2.6.26-saturn7-svn/config-flash
+END
+config-normal
+K 25
+svn:wc:ra_dav:version-url
+V 88
+/gp2/!svn/ver/16170/trunk/os/saturn7_linux/kernel/linux-2.6.26-saturn7-svn/config-normal
+END
+Makefile
+K 25
+svn:wc:ra_dav:version-url
+V 83
+/gp2/!svn/ver/18910/trunk/os/saturn7_linux/kernel/linux-2.6.26-saturn7-svn/Makefile
+END

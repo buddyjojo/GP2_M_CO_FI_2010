@@ -1,0 +1,7 @@
+config MSTAR_SAR
+
+tristate "SAR"
+
+help
+    Titania3 SAR driver function
+

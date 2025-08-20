@@ -1,0 +1,6 @@
+config BT_CSR
+
+tristate "Support CSR Bluetooth Module"
+	default n
+	help
+    	CSR Bluetooth Driver

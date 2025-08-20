@@ -1,0 +1,8 @@
+config MSTAR_SYSTEM
+
+tristate "System"
+	# dhjung LGE
+	depends on MSTAR_DRIVER
+	select CRC32
+	# dhjung LGE
+	default n

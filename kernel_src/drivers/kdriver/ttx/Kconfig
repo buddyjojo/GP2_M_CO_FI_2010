@@ -1,0 +1,9 @@
+config MSTAR_TTX
+	tristate "TTX"
+	# dhjung LGE
+	depends on MSTAR_DRIVER
+	# dhjung LGE
+	default n
+	help
+    	enable MStar TTX driver.
+    

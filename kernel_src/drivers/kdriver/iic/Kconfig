@@ -1,0 +1,10 @@
+config MSTAR_IIC
+
+tristate "IIC"
+	# dhjung LGE
+	depends on MSTAR_DRIVER
+	# dhjung LGE
+	default n
+	help
+   		MStar IIC driver function
+    

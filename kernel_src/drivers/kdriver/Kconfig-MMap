@@ -1,0 +1,31 @@
+
+# drivers/MStar/Kconfig-MMap
+
+choice
+	prompt "MStar DTV Memory Map Config"
+	default MSTAR_TITANIA_MMAP_32MB
+
+config MSTAR_TITANIA_MMAP_32MB
+	bool "MMAP 32MB"
+
+config MSTAR_TITANIA_MMAP_64MB
+	bool "MMAP 64MB"
+
+config MSTAR_TITANIA_MMAP_32MB_32MB
+	bool "MMAP 32MB+32MB"
+
+config MSTAR_TITANIA_MMAP_64MB_32MB
+	bool "MMAP 64MB+32MB"
+
+config MSTAR_TITANIA_MMAP_64MB_64MB
+	bool "MMAP 64MB+64MB"
+
+config MSTAR_TITANIA_MMAP_128MB_128MB
+        bool "MMAP 128MB+128MB"
+
+config MSTAR_TITANIA_MMAP_4MB_FLASH
+	bool "MMAP 4MB Flash"
+
+config MSTAR_TITANIA_MMAP_256MB_256MB
+	bool "MMAP 256MB+256MB"
+endchoice

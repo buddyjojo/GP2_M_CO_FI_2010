@@ -1,0 +1,6810 @@
+////////////////////////////////////////////////////////////////////////////////
+//
+// Copyright (c) 2006-2007 MStar Semiconductor, Inc.
+// All rights reserved.
+//
+// Unless otherwise stipulated in writing, any and all information contained
+// herein regardless in any format shall remain the sole proprietary of
+// MStar Semiconductor Inc. and be kept in strict confidence
+// (¨MStar Confidential Information〃) by the recipient.
+// Any unauthorized act including without limitation unauthorized disclosure,
+// copying, use, reproduction, sale, distribution, modification, disassembling,
+// reverse engineering and compiling of the contents of MStar Confidential
+// Information is unlawful and strictly prohibited. MStar hereby reserves the
+// rights to any and all damages, losses, costs and expenses resulting therefrom.
+//
+////////////////////////////////////////////////////////////////////////////////
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+///
+/// file    cmd_splash.c
+/// @brief  System Driver Interface
+/// @author MStar Semiconductor Inc.
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+//-------------------------------------------------------------------------------------------------
+//  Include Files
+//-------------------------------------------------------------------------------------------------
+#include <asm/system.h>
+#include <common.h>
+#include <malloc.h>
+#include <splash_auxinfo_jpg.h>
+#include <command.h>
+#include <mtdinfo.h>
+#include <nand.h>
+#include "nvm.h"
+#include "micom.h"
+#include "../drivers/mdrv_pwm.h"
+#include "../drivers/mdrv_scaler.h"
+#include "../drivers/mdrv_tcon.h"
+#include "../drivers/mdrv_tcon_tbl.h"
+#include "../drivers/mfc/mdrv_mfc_st.h"
+#include "bgtask_powseq.h"
+
+//-------------------------------------------------------------------------------------------------
+//  Local Defines
+//-------------------------------------------------------------------------------------------------
+#define TIME_TEST    					0
+
+//#define LOGO_1366  1
+
+
+#define BOOL							U8
+#define USE_MEASURE_TIME      			0
+
+#define GOP4G_BANK 						0           // GOP 0
+#define GOP2G_BANK 						3           // GOP 1
+#define GOP1G_BANK 						7           // GOP 2
+#define GOP1GS_BANK						10          // GOP 3
+
+#define GOP_BUFFER						0x02600000
+
+#define SYS_REGOP(addr)					(*((volatile unsigned int*)(0xBF200000 + (addr))))
+#define PM_REGOP(addr) 					(*((volatile unsigned int*)(0xBF000000 + (addr))))
+
+#define printk							printf
+
+#define IMG_LOADED_ADDR					(CFG_LOAD_ADDR | 0x20000000)	//(0xA2000000)
+#define GOP_OUT_ADDR					(0x42000000)					//(0xA2C00000) //0x42000000 //0xA8100000
+#define _0FFSET							(0x600000)
+
+#define SPLASH_BG_BOOTING_BMP_ADDR		(0x85000000 | 0x20000000)		//0xA4000000 to 0x85000000
+#define SPLASH_LG_LOG_BMP_ADDR			(SPLASH_BG_BOOTING_BMP_ADDR + _0FFSET)
+#define	SPLASH_BG_GRAPHIC_BMP_ADDR		(SPLASH_LG_LOG_BMP_ADDR + _0FFSET)
+#define	SPLASH_CLOCK_ICON_BMP_ADDR		(SPLASH_BG_GRAPHIC_BMP_ADDR + _0FFSET)
+#define	SPLASH_TIME_COLON_BMP_ADDR		(SPLASH_CLOCK_ICON_BMP_ADDR + _0FFSET)
+#define	SPLASH_TIME_HH_BMP_ADDR			(SPLASH_TIME_COLON_BMP_ADDR + _0FFSET)
+#define	SPLASH_TIME_H_BMP_ADDR			(SPLASH_TIME_HH_BMP_ADDR + _0FFSET)
+#define	SPLASH_TIME_MM_BMP_ADDR			(SPLASH_TIME_H_BMP_ADDR + _0FFSET)
+#define	SPLASH_TIME_M_BMP_ADDR			(SPLASH_TIME_MM_BMP_ADDR + _0FFSET)
+#define SPLASH_BITBLT_BUF_ADDR          (SPLASH_TIME_M_BMP_ADDR + _0FFSET)
+
+
+#define BIT0 							0x00000001
+#define BIT1 							0x00000002
+#define BIT2 							0x00000004
+#define BIT3 							0x00000008
+#define BIT4 							0x00000010
+#define BIT5 							0x00000020
+#define BIT6 							0x00000040
+#define BIT7 							0x00000080
+#define BIT8 							0x00000100
+#define BIT9 							0x00000200
+#define BIT10							0x00000400
+#define BIT11							0x00000800
+#define BIT12							0x00001000
+#define BIT13							0x00002000
+#define BIT14							0x00004000
+#define BIT15							0x00008000
+
+#define REG_CHIP_BASE					0xBF203C00
+#define REG_MIPS_BASE					0xBF000000//Use 8 bit addressing
+#define MHal_GPIO_REG(addr) 			(*(volatile U8*)(REG_MIPS_BASE + (((addr) & ~1)<<1) + (addr & 1)))
+#define mdelay(n)						udelay((n)*1000)
+
+
+typedef enum{
+	FRC_OPT_SEL,
+	FRC_OPT1_SEL,
+	LVDS_OPT_SEL,
+	DDRSIZE_OPT_SEL,
+	PANEL_RES_OPT_SEL,
+	GIP_OPT_SEL,
+	OLED_SEL,
+	MICOM_HW_OPT_SEL,
+}HW_OPT_T;
+
+DECLARE_GLOBAL_DATA_PTR;
+
+//-------------------------------------------------------------------------------------------------
+//  Export
+//-------------------------------------------------------------------------------------------------
+
+
+//-------------------------------------------------------------------------------------------------
+//  Global Variables
+//-------------------------------------------------------------------------------------------------
+extern void MAdp_MFC_WriteByte(U16 u16Addr, U8 u8Value);
+
+//-------------------------------------------------------------------------------------------------
+//  Local Variables
+//-------------------------------------------------------------------------------------------------
+unsigned char u8GOP = GOP1G_BANK;
+
+//-------------------------------------------------------------------------------------------------
+//  Debug Functions
+//-------------------------------------------------------------------------------------------------
+
+//-------------------------------------------------------------------------------------------------
+//  Local Functions
+//-------------------------------------------------------------------------------------------------
+void Splash_GetJpegInfo(SPLASH_BMP_TYPE_T bmpType, SPLASH_BMP_INFO_T *pSplashBmpInfo, void *argv );//yongs_logo
+U8 Splash_GetPDPResOpt(void);	// 091125_KimTH_01: PDP boot logo 대응
+U8 Splash_GetHWoption(HW_OPT_T option_mask);
+U8 Splash_MICOM_PanelOn(void);
+
+#if 0
+static void mstar_msleep( unsigned int ms )
+{
+	U32 ret_timer ;
+	U32 limit ;
+
+	// stop and capture timer value
+	PM_REGOP( (0x3C88<<1) ) = 0x0300 ;
+
+	// set max timer0 value
+	PM_REGOP( (0x3C80<<1) ) = 0xFFFF ;
+	PM_REGOP( (0x3C82<<1) ) = 0xFFFF ;
+	// re-start timer
+	PM_REGOP( (0x3C88<<1) ) = 0x0003 ;
+	PM_REGOP( (0x3C88<<1) ) = 0x0300 ;
+	limit = 12000*ms ;
+	while(1){
+		// capture timer value
+		PM_REGOP( (0x3C88<<1) ) = 0x0301 ;
+		PM_REGOP( (0x3C80<<1) ) = 0xFFFF ;
+		PM_REGOP( (0x3C82<<1) ) = 0xFFFF ;
+		PM_REGOP( (0x3C82<<1) ) = 0xFFFF ; // one more right for delay
+		ret_timer = PM_REGOP( (0x3C86<<1) ) ;
+		ret_timer <<= 16 ;
+		ret_timer += PM_REGOP( (0x3C84<<1) ) ;
+		if( ret_timer>=limit )
+			return ;
+		else
+		{
+			printf("ret_timer = %x, limit = %x\n", ret_timer, limit);
+		}
+	}
+}
+#else
+static void mstar_msleep( unsigned int ms )
+{
+	U32 ret_timer = 0xFFFF;
+
+	while (ret_timer)
+	{
+		ret_timer--;
+	}
+}
+#endif
+
+#if TIME_TEST
+static U32 stimer( void )
+{
+	U32 ret_timer ;
+
+	// stop and capture timer value
+	PM_REGOP( (0x3C88<<1) ) = 0x0301 ;
+	// set max timer0 value
+	PM_REGOP( (0x3C80<<1) ) = 0xFFFF ;
+	PM_REGOP( (0x3C82<<1) ) = 0xFFFF ;
+	PM_REGOP( (0x3C82<<1) ) = 0xFFFF ; // one more right for delay
+	ret_timer = PM_REGOP( (0x3C86<<1) ) ;
+	ret_timer <<= 16 ;
+	ret_timer += PM_REGOP( (0x3C84<<1) ) ;
+	// re-start timer
+	PM_REGOP( (0x3C88<<1) ) = 0x0003 ;
+	PM_REGOP( (0x3C88<<1) ) = 0x0300 ;
+	return ret_timer ;
+}
+#endif
+
+#if USE_MEASURE_TIME
+#define REG_PIU_TIMER0(_x_)              (0x003020 | (_x_ << 1))
+static U32 stimer_sc( U8 u8status )
+{
+	U32 u32Timer =0;
+	if(u8status == 0)
+	{
+		REG_WR(REG_PIU_TIMER0(0x00), 0x0);
+		REG_WR(REG_PIU_TIMER0(0x00), 0x1);
+	}
+	if(u8status)
+	{
+		u32Timer = ((U32)REG_RR(REG_PIU_TIMER0(0x04))) |
+			((U32)REG_RR(REG_PIU_TIMER0(0x05)) << 16); // h0005:h0004
+	}
+	return u32Timer ;
+}
+#endif
+
+//
+// Decode JPEG
+//-----------------------------------------------------------------
+
+#define JPEG_MAXNUMBER       16
+#define JPEG_MAXBLOCKSPERMCU 10
+#define JPEG_MAXHUFFTABLES   8
+#define JPEG_MAXQUANTTABLES  4
+#define JPEG_MAXCOMPONENTS   4
+#define JPEG_MAXCOMPSINSCAN  4
+
+//#define JPEG_PRINT(fmt, args...)         printk("[JPEG][%06d]     " fmt, __LINE__, ## args)
+#define JPEG_PRINT(fmt, args...)
+
+
+#define MAX_JPEG_OUTPUT_WIDTH   1920
+#define MAX_JPEG_OUTPUT_HEIGHT  1080
+
+#define MemAlign(n, unit)           ((((n)+(unit)-1)/(unit))*(unit))
+#define OUTPUT_BUFF_SIZE MemAlign(MAX_JPEG_OUTPUT_WIDTH*MAX_JPEG_OUTPUT_HEIGHT*2,0x100000)
+
+#define JPEG_TYPE_MAIN          0
+#define JPEG_TYPE_THUMBNAIL     1
+#define JPEG_TYPE_MJPEG         2
+
+typedef enum
+{
+	EN_JPD_DECODING,
+	EN_JPD_DECODE_DONE,
+	EN_JPD_DECODE_ERROR,
+	EN_JPD_MRBFH_DONE,
+	EN_JPD_MRBFL_DONE
+} EN_JPD_STATUS;
+
+typedef struct
+{
+	U32 u32OriginalWidth;
+	U32 u32OriginalHeight;
+	U32 u32Width;
+	U32 u32Height;
+	U8  u8BitPP;
+	U8  u8Progressive;
+	EN_JPD_STATUS enJPDStatus;
+} JPEG_PIC_Info;
+
+typedef struct
+{
+	U8  u8GwinID;
+	U32 u32X;
+	U32 u32Y;
+	U32 u32Width;
+	U32 u32Height;
+} GWIN_INFO;
+
+typedef struct
+{
+	U8 u8GwinID;
+	U8 u8R_bg;
+	U8 u8G_bg;
+	U8 u8B_bg;
+} GWIN_BG_INFO;
+
+typedef struct
+{
+    U32 u32BufAddr;
+    U16 u16Width;
+    U16 u16Height;
+} BITBLT_BUF_INFO;
+
+
+static U32 jpegWidth[JPEG_MAXNUMBER];
+static U32 jpegHeight[JPEG_MAXNUMBER];
+
+#define JPEG_DEFAULT_EXIF_SIZE      (64*1024UL + 128)
+
+#define MRC_BUFFER_ADDR             _u32ReadBufferAddr
+#define MRC_BUFFER_SIZE             _u32ReadBufferSize
+#define MWC_BUFFER_ADDR             _u32WriteBufferAddr
+#define INTERNAL_BUFFER_ADDR        _u32InternalBufferAddr
+#define INTERNAL_BUFFER_SIZE        _u32InternalBufferSize
+
+static U32 _u32ReadBufferSize;
+static U32 _u32ReadBufferAddr;
+static U32 _u32WriteBufferAddr;
+static U32 _u32InternalBufferAddr;
+static U32 _u32InternalBufferSize;
+static U32 _u32RLEOffset;   // offset to record the current RLE access address
+
+static U8 *_pu8In_buf;
+static U8 _u8FileReadEnd_flag = 0 ;
+
+static GWIN_INFO    _Gwin_info[4];
+//static GWIN_BG_INFO _Gwin_bg_info;
+
+#define MIN_READBUFFER_SIZE 128
+
+struct __mem__
+{
+	struct __mem__  *next;    /* single-linked list */
+	U32	  len;      /* length of following block */
+};
+
+typedef struct __mem__	 __memt__;
+typedef __memt__  *__memp__;
+
+#define	HLEN	(sizeof(__memt__))
+#define MIN_BLOCK	(HLEN * 4)
+
+static __memt__  __mem_avail__ [2] =
+{
+	{ NULL, 0 },	/* HEAD for the available block list */
+	{ NULL, 0 },	/* UNUSED but necessary so free doesn't join HEAD or ROVER with the pool */
+};
+
+#define AVAIL			(__mem_avail__[0])
+#define MIN_POOL_SIZE	(HLEN * 10)
+
+int G_MDrv_JPEG_init_mempool (void *pool, U32 size)
+{
+	if (size < MIN_POOL_SIZE)
+		return 0; 					/* FAILURE */
+
+	if (pool == NULL)
+	{
+		pool = (void *)1;
+		size--;
+	}
+
+	//memset(pool, 0, size);
+
+	AVAIL.next = (struct __mem__  *)pool;
+	AVAIL.len  = size;
+
+	(AVAIL.next)->next = NULL;
+	(AVAIL.next)->len  = size - HLEN;
+
+	return 1;   					/* SUCCESS */
+}
+
+int G_MDrv_JPEG_SetInitParameter(U32 u32RBufAddr, U32 u32RBufSize, U32 u32WBufAddr, U32 u32IBufAddr, U32 u32IBufSize, U8 u8FileEnd)
+{
+	// the buffer size must be multiple of 4 bytes
+	if( u32RBufSize < MIN_READBUFFER_SIZE )
+	{
+		JPEG_PRINT("ERROR\n");
+		return 0 ;
+	}
+	// the buffer size must be multiple of 8 bytes
+	u32RBufSize = u32RBufSize & ~0x7;
+
+	MRC_BUFFER_ADDR = u32RBufAddr;
+	MWC_BUFFER_ADDR = u32WBufAddr;
+	INTERNAL_BUFFER_ADDR = u32IBufAddr;
+	MRC_BUFFER_SIZE = u32RBufSize;
+	INTERNAL_BUFFER_SIZE = u32IBufSize;
+
+	_pu8In_buf = (U8 *) u32RBufAddr;
+	_u8FileReadEnd_flag = u8FileEnd;
+
+	JPEG_PRINT("MRC= 0x%X\n", MRC_BUFFER_ADDR);
+	JPEG_PRINT("MWC= 0x%X\n", MWC_BUFFER_ADDR);
+	JPEG_PRINT("INT= 0x%X\n", INTERNAL_BUFFER_ADDR);
+
+	G_MDrv_JPEG_init_mempool(((U8 *) (u32IBufAddr + JPEG_DEFAULT_EXIF_SIZE)), u32IBufSize - JPEG_DEFAULT_EXIF_SIZE);
+
+	return 1 ;
+}
+
+static U8 _u8DecodeType = JPEG_TYPE_MAIN;
+// The width/height may be the thumbnail or original image size, it based on decoding mode
+static U16 _u16Image_x_size;
+static U16 _u16Image_y_size;
+// The original size of this JPEG file
+static U16 _u16OriginalImage_x_size;
+static U16 _u16OriginalImage_y_size;
+
+static U32 _bProgressive_flag;
+static U8 _u8DownScaleRatio;
+static U32 _bFirstRLE;
+
+// The Luma and Chroma (YU) component ID, default is 1 & 2
+static U8 _u8LumaCi = 1;
+static U8 _u8ChromaCi = 2;
+
+static S16 _s16Error_code;
+static BOOL _bReady_flag;
+
+/************* Downscale Ratio *************/
+/*** Bellows are 1, 1/2, 1/4 and 1/8, in order ***/
+#define G_JPD_DOWNSCALE_ORG       0x00
+#define G_JPD_DOWNSCALE_HALF      0x01
+#define G_JPD_DOWNSCALE_FOURTH    0x02
+#define G_JPD_DOWNSCALE_EIGHTH    0x03
+/********************I*********************/
+
+#define QUANT_TYPE S16
+#define BLOCK_TYPE S16
+
+static BLOCK_TYPE _s16dc_pred[3];
+
+typedef struct
+{
+	U32 bValid;
+	U8 u8Huff_num[17]; /* number of Huffman codes per bit size */
+	U8 u8Huff_val[256]; /* Huffman codes per bit size */
+
+	U8 u8Symbol[17]; /* u8Huff_num in reverse order.. */
+	U16 u16Code[17]; /* Minimun code word */
+} HUFF_INFO;
+static HUFF_INFO _Huff_info[JPEG_MAXHUFFTABLES];
+
+
+typedef struct tagQUANT_TABLES
+{
+	U32 bValid;
+	QUANT_TYPE s16Value[64];
+} QUANT_TABLES, *PQUANT_TABLES;
+static QUANT_TABLES _QuantTables[JPEG_MAXQUANTTABLES]; /* pointer to quantization tables */
+
+static U8 gu8Scan_type;                      /* Grey, Yh1v1, Yh1v2, Yh2v1, Yh2v2,
+												CMYK111, CMYK4114 */
+static U8 _u8Comps_in_frame;                      /* # of components in frame */
+
+static U8 _u8Comp_h_samp[JPEG_MAXCOMPONENTS];     /* component's horizontal sampling factor */
+static U8 _u8Comp_v_samp[JPEG_MAXCOMPONENTS];     /* component's vertical sampling factor */
+static U8 _u8Comp_quant[JPEG_MAXCOMPONENTS];      /* component's quantization table selector */
+static U8 _u8Comp_ident[JPEG_MAXCOMPONENTS];      /* component's ID */
+
+static U16 _u16Comp_h_blocks[JPEG_MAXCOMPONENTS];
+static U16 _u16Comp_v_blocks[JPEG_MAXCOMPONENTS];
+
+static U8 _u8Comps_in_scan;                  /* # of components in scan */
+static U8 _u8Comp_list[JPEG_MAXCOMPSINSCAN];      /* components in this scan */
+static U8 _u8Comp_dc_tab[JPEG_MAXCOMPONENTS];     /* component's DC Huffman coding table selector */
+static U8 _u8Comp_ac_tab[JPEG_MAXCOMPONENTS];     /* component's AC Huffman coding table selector */
+
+static U8 _u8Spectral_start;                 /* spectral selection start */
+static U8 _u8Spectral_end;                   /* spectral selection end   */
+static U8 _u8Successive_low;                 /* successive approximation low */
+static U8 _u8Successive_high;                /* successive approximation high */
+
+static U8 gu8Max_mcu_x_size;                 /* MCU's max. X size in pixels */
+static U8 gu8Max_mcu_y_size;                 /* MCU's max. Y size in pixels */
+
+static U8 _u8Blocks_per_mcu;
+static U32 _u32Max_blocks_per_row;
+static U16 _u16Mcus_per_row, _u16Mcus_per_col;
+
+static U8 _u8Mcu_org[JPEG_MAXBLOCKSPERMCU];
+
+#define JPEG_MAXBLOCKS    50
+static void *_pBlocks[JPEG_MAXBLOCKS];         /* list of all dynamically allocated blocks */
+
+#define SUPPORT_PROGRESSIVE_MODE    1
+
+#if SUPPORT_PROGRESSIVE_MODE
+
+typedef struct tagHUFF_TABLES
+{
+	S16 s16Look_up[256];
+	U8 u8Code_size[256];
+	// FIXME: Is 512 tree entries really enough to handle _all_ possible
+	// code sets? I think so but not 100% positive.
+	S16 s16Tree[512];
+} HUFF_TABLES, *PHUFF_TABLES;
+
+typedef struct tagCOEFF_BUF
+{
+	U8 *pu8Data;
+
+	U16 u16Block_num_x, u16Block_num_y;
+	U8 u8Block_len_x, u8Block_len_y;
+
+	U16 u16Block_size;
+} COEFF_BUF, *PCOEFF_BUF;
+
+static U16 _u16Total_lines_left;               /* total # lines left in image */
+static U16 gu16Mcu_lines_left;                 /* total # lines left in this MCU */
+static U32 _u32Block_y_mcu[JPEG_MAXCOMPONENTS];
+static HUFF_TABLES _Huff_tbls[JPEG_MAXHUFFTABLES];
+static PCOEFF_BUF _DC_Coeffs[JPEG_MAXCOMPONENTS];
+static PCOEFF_BUF _AC_Coeffs[JPEG_MAXCOMPONENTS];
+static U32 _u32Last_dc_val[JPEG_MAXCOMPONENTS];
+
+static U32 _u32EOB_run;
+#endif
+
+static U8 *_pu8In_buf_ofs;
+static U32 _u32In_buf_left;
+static U8 _u8Tem_flag;
+static U32 _bEOF_flag;
+
+static U16 _u16Restart_interval;
+static U16 _u16Restarts_left;
+static U16 _u16Next_restart_num;
+
+static U16 gu16Max_mcus_per_row;
+static U16 _u16Max_blocks_per_mcu;
+static U16 _u16Max_mcus_per_col;
+
+//static jmp_buf _jmp_state;
+static S32  _Total_Decoded_Size = 0;
+static U32 _u32Total_bytes_read;
+
+static U32 _bThumbnailAccessMode;
+
+static S16 _s16Bits_left;
+
+static U8 *_pu32ExifHeaderAddr;
+
+static void G_MDrv_JPEG_init( void )
+{
+	U16 i;
+
+	_u8LumaCi = 1;
+	_u8ChromaCi = 2;
+
+	_s16Error_code = 0;
+
+	_bReady_flag = 0 ;
+
+	_u16Image_x_size = _u16Image_y_size = 0;
+	_u16OriginalImage_x_size = _u16OriginalImage_y_size = 0;
+
+	//_pStream = _Pstream;
+
+	_bProgressive_flag = 0;
+	_u8DownScaleRatio = G_JPD_DOWNSCALE_ORG;
+	_u32RLEOffset = 0;
+	_bFirstRLE = 0;
+
+	_s16dc_pred[0] = _s16dc_pred[1] = _s16dc_pred[2] = 0;
+
+
+
+	for(i = 0; i<JPEG_MAXHUFFTABLES; i++)
+	{
+		_Huff_info[i].bValid = 0;
+		memset(_Huff_info[i].u8Huff_num, 0, 17);
+		memset(_Huff_info[i].u8Huff_val, 0, 256);
+		memset(_Huff_info[i].u8Symbol, 0, 17);
+		memset(_Huff_info[i].u16Code, 0, 17);
+	}
+
+	for(i = 0; i<JPEG_MAXQUANTTABLES; i++)
+	{
+		_QuantTables[i].bValid = 0;
+		memset(_QuantTables[i].s16Value, 0, 64);
+	}
+
+	gu8Scan_type = 0;
+
+	_u8Comps_in_frame = 0;
+
+	memset( _u8Comp_h_samp, 0, sizeof( _u8Comp_h_samp ) );
+	memset( _u8Comp_v_samp, 0, sizeof( _u8Comp_v_samp ) );
+	memset( _u8Comp_quant, 0, sizeof( _u8Comp_quant ) );
+	memset( _u8Comp_ident, 0, sizeof( _u8Comp_ident ) );
+	memset( _u16Comp_h_blocks, 0, sizeof( _u16Comp_h_blocks ) );
+	memset( _u16Comp_v_blocks, 0, sizeof( _u16Comp_v_blocks ) );
+
+	_u8Comps_in_scan = 0;
+	memset( _u8Comp_list, 0, sizeof( _u8Comp_list ) );
+	memset( _u8Comp_dc_tab, 0, sizeof( _u8Comp_dc_tab ) );
+	memset( _u8Comp_ac_tab, 0, sizeof( _u8Comp_ac_tab ) );
+
+	_u8Spectral_start = 0;
+	_u8Spectral_end = 0;
+	_u8Successive_low = 0;
+	_u8Successive_high = 0;
+
+	gu8Max_mcu_x_size = 0;
+	gu8Max_mcu_y_size = 0;
+
+	_u8Blocks_per_mcu = 0;
+	_u32Max_blocks_per_row = 0;
+	_u16Mcus_per_row = 0;
+	_u16Mcus_per_col = 0;
+
+	memset( _u8Mcu_org, 0, sizeof( _u8Mcu_org ) );
+
+	memset( _pBlocks, 0, sizeof( _pBlocks ) );
+
+#if SUPPORT_PROGRESSIVE_MODE
+	_u16Total_lines_left = 0;
+	gu16Mcu_lines_left = 0;
+	memset( _u32Block_y_mcu, 0, sizeof( _u32Block_y_mcu ) );
+	memset( _Huff_tbls, 0, sizeof( _Huff_tbls ) );
+	memset( _DC_Coeffs, 0, sizeof( _DC_Coeffs ) );
+	memset( _AC_Coeffs, 0, sizeof( _AC_Coeffs ) );
+	memset( _u32Last_dc_val, 0, sizeof( _u32Last_dc_val ) );
+
+	_u32EOB_run = 0;
+#endif
+
+	_pu8In_buf_ofs = _pu8In_buf;
+	_u32In_buf_left = 0;
+	_bEOF_flag = 0;
+	_u8Tem_flag = 0;
+
+	//sharon memset( _pu8In_buf, 0, sizeof(U8)*(MRC_BUFFER_SIZE + 128) );
+
+	_u16Restart_interval = 0;
+	_u16Restarts_left = 0;
+	_u16Next_restart_num = 0;
+
+	gu16Max_mcus_per_row = 0;
+	_u16Max_blocks_per_mcu = 0;
+	_u16Max_mcus_per_col = 0;
+
+	_u32Total_bytes_read = 0;
+
+	// Tell the stream we're going to use it.
+	//_pStream->attach();
+
+	// Ready the input buffer.
+	if(_bThumbnailAccessMode)
+	{
+		//MDrv_JPEG_fill_read_buffer();
+	}
+	else
+	{
+		_u32In_buf_left = MRC_BUFFER_SIZE;  //sharon
+		_Total_Decoded_Size = MRC_BUFFER_SIZE;  //sharon
+		_u32Total_bytes_read = MRC_BUFFER_SIZE;  //sharon
+	}
+
+	// Prime the bit buffer.
+	_s16Bits_left = 16;
+
+	_pu32ExifHeaderAddr = 0;
+}
+
+typedef enum
+{
+	M_SOF0 = 0xC0,
+	M_SOF1 = 0xC1,
+	M_SOF2 = 0xC2,
+	M_SOF3 = 0xC3,
+	M_SOF5 = 0xC5,
+	M_SOF6 = 0xC6,
+	M_SOF7 = 0xC7,
+	M_JPG = 0xC8,
+	M_SOF9 = 0xC9,
+	M_SOF10 = 0xCA,
+	M_SOF11 = 0xCB,
+	M_SOF13 = 0xCD,
+	M_SOF14 = 0xCE,
+	M_SOF15 = 0xCF,
+	M_DHT = 0xC4,
+	M_DAC = 0xCC,
+	M_RST0 = 0xD0,
+	M_RST1 = 0xD1,
+	M_RST2 = 0xD2,
+	M_RST3 = 0xD3,
+	M_RST4 = 0xD4,
+	M_RST5 = 0xD5,
+	M_RST6 = 0xD6,
+	M_RST7 = 0xD7,
+	M_SOI = 0xD8,
+	M_EOI = 0xD9,
+	M_SOS = 0xDA,
+	M_DQT = 0xDB,
+	M_DNL = 0xDC,
+	M_DRI = 0xDD,
+	M_DHP = 0xDE,
+	M_EXP = 0xDF,
+	M_APP0 = 0xE0,
+	M_APP1 = 0xE1,
+	M_APP15 = 0xEF,
+	M_JPG0 = 0xF0,
+	M_JPG13 = 0xFD,
+	M_COM = 0xFE,
+	M_TEM = 0x01,
+	M_ERROR = 0x100
+} EN_JPEG_MARKER;
+
+static U32 _u32Bit_buf;
+
+static U8 MDrv_JPEG_get_char( void )
+{
+	U8 c;
+
+	// Any bytes remaining in buffer?
+	if ( !_u32In_buf_left )
+	{
+		// Try to get more bytes.
+		//MDrv_JPEG_fill_read_buffer();
+		// Still nothing to get?
+		if ( !_u32In_buf_left )
+		{
+			// Padd the end of the stream with 0xFF 0xD9 (EOI marker)
+			// FIXME: Is there a better padding pattern to use?
+			U8 t = _u8Tem_flag;
+			_u8Tem_flag ^= 1;
+			if ( t )
+			{
+				return ( 0xD9 );
+			}
+			else
+			{
+				return ( 0xFF );
+			}
+		}
+	}
+
+	c = *_pu8In_buf_ofs++;
+	_u32In_buf_left--;
+
+	return ( c );
+}
+
+static U32 G_MDrv_JPEG_locate_soi_marker( void )
+{
+	U32 lastchar, thischar;
+	U32 bytesleft;
+
+	lastchar = MDrv_JPEG_get_char();
+
+	thischar = MDrv_JPEG_get_char();
+
+	/* ok if it's a normal JPEG file without a special header */
+	//JPEG_PRINT("last=%X  this=%X\n", lastchar, thischar);
+
+	if ( ( lastchar == 0xFF ) && ( thischar == M_SOI ) )
+	{
+		JPEG_PRINT("SOI\n");
+		return 1;
+	}
+
+	bytesleft = 640; //Fix this number from 512 -> 640 for some cases
+
+	for ( ; ; )
+	{
+		if ( --bytesleft == 0 )
+		{
+			return 0;
+		}
+
+		lastchar = thischar;
+
+		thischar = MDrv_JPEG_get_char();
+
+		if ( ( lastchar == 0xFF ) && ( thischar == M_SOI ) )
+		{
+			JPEG_PRINT("SOI\n");
+			break;
+		}
+	}
+
+	/* Check the next character after marker: if it's not 0xFF, it can't
+	   be the start of the next marker, so it probably isn't a JPEG */
+
+	thischar = ( _u32Bit_buf >> 8 ) & 0xFF;
+
+	if ( thischar != 0xFF )
+	{
+		return 0;
+	}
+	return 1;
+}
+
+static U32 _bThumbnailFound;
+
+static U32 MDrv_JPEG_next_marker( void ) //ok
+{
+	U32 c, bytes;
+
+	bytes = 0;
+
+	do
+	{
+		do
+		{
+			bytes++;
+
+			c = MDrv_JPEG_get_char();
+
+		}
+		while ( c != 0xFF );
+
+		do
+		{
+			c = MDrv_JPEG_get_char();
+		}
+		while ( c == 0xFF );
+	}
+	while ( c == 0 );
+
+	// If bytes > 0 here, there where extra bytes before the marker (not good).
+
+	return c;
+}
+
+
+static U32 _u32ThumbnailBufferOffset;   // keep track of thumb buffer access address
+static U32 _u16ThumbnailBufferSize;   // keep track of thumb buffer size
+static U32 _u32ThumbnailOffset;
+static U16 _u16ThumbnailSize;
+
+static U32 MDrv_JPEG_GetU32(U8 *data)
+{
+	S8 i;
+	U32 val = 0;
+
+	for(i = 3; i>=0; i--)
+		val = (val << 8) + (U8) *(data + i);
+
+	return val;
+}
+
+//------------------------------------------------------------------------------
+/* EXIF parsing section */
+#define EndianChangeL(_x)   \
+	(((_x & 0xff) << 24) | ((_x & 0xff00) << 8) | ((_x & 0xff0000) >> 8) | ((_x & 0xff000000) >> 24))
+
+#define EndianChangeS(_x)   \
+	(((_x & 0xff) << 8) | ((_x & 0xff00) >> 8))
+
+#define JPEG_TAG_EXIF               EndianChangeL(0x45786966)
+#define JPEG_TIFF_SOI_OFFSET        0x0201
+#define JPEG_TIFF_JPEG_IMG_BYTES    0x0202
+
+#define JPEG_TIFF_BIG_ENDIAN        0x4D4D
+#define JPEG_TIFF_LITTLE_ENDIAN     0x4949
+
+static U16 MDrv_JPEG_GetU16(U8 *data)
+{
+	S8 i;
+	U16 val = 0;
+
+	for(i = 1; i>=0; i--)
+		val = (val << 8) + (U8) *(data + i);
+
+	return val;
+}
+
+static U32 _bTiffBigEndian;
+
+static U16 MDrv_JPEG_Tiff_EndianChangeS(U16 u16Val)
+{
+	if (_bTiffBigEndian)
+		return EndianChangeS(u16Val);
+	else
+		return u16Val;
+}
+
+static U32 MDrv_JPEG_Tiff_EndianChangeL(U32 u32Val)
+{
+	if (_bTiffBigEndian)
+		return EndianChangeL(u32Val);
+	else
+		return u32Val;
+}
+
+static U32 MDrv_JPEG_DecodeExifInfo(U8 *data, U32 data_length)
+{
+	U8 *pJpegBuff = data;
+	U32  u32tmp, u32Len;
+	U16  u16Marker, u16Len, u16NumOfEntry, i;
+	U8   *pTiffHdrPtr, *pNextIfd;
+
+	u32tmp = MDrv_JPEG_GetU32(pJpegBuff);
+	if (u32tmp != JPEG_TAG_EXIF)
+	{
+		return 0;
+	}
+
+	// Exif starts here
+	pJpegBuff += 6;
+	u16Marker = MDrv_JPEG_GetU16(pJpegBuff);
+	if (u16Marker == JPEG_TIFF_BIG_ENDIAN)
+		_bTiffBigEndian = 1;
+	else if (u16Marker == JPEG_TIFF_LITTLE_ENDIAN)
+		_bTiffBigEndian = 0;
+	else
+		return 0;
+
+	_u32ThumbnailOffset += 6;
+	pTiffHdrPtr = pJpegBuff;
+
+	pJpegBuff += 2;
+	u16Marker = MDrv_JPEG_Tiff_EndianChangeS(MDrv_JPEG_GetU16(pJpegBuff));
+	if (u16Marker != 0x002A)
+		return 0;
+
+	pJpegBuff += 2;
+	u16Len = (U16)MDrv_JPEG_Tiff_EndianChangeL(MDrv_JPEG_GetU32(pJpegBuff));
+	pJpegBuff += (u16Len - 4);
+
+	// 0th IFD start here
+	u16NumOfEntry = MDrv_JPEG_Tiff_EndianChangeS(MDrv_JPEG_GetU16(pJpegBuff));
+	pJpegBuff += 2;
+
+	// Boundary check, prevent from buffer over-run
+	if((((U32) pJpegBuff) - INTERNAL_BUFFER_ADDR + u16NumOfEntry*12)>=data_length)
+	{
+		return 0;
+	}
+
+	pJpegBuff += 12*u16NumOfEntry;
+
+	// 1th IFD
+	u32tmp = MDrv_JPEG_Tiff_EndianChangeL(MDrv_JPEG_GetU32(pJpegBuff));
+	if (u32tmp == 0)
+		return 0;
+	else
+		pNextIfd = &pTiffHdrPtr[u32tmp];
+
+	u16NumOfEntry = MDrv_JPEG_Tiff_EndianChangeS(MDrv_JPEG_GetU16(pNextIfd));
+	pNextIfd += 2;
+
+	// Boundary check, prevent from buffer over-run
+	if((((U32) pNextIfd) - INTERNAL_BUFFER_ADDR + u16NumOfEntry*12)>=data_length)
+	{
+		return 0;
+	}
+
+	for (i = 0; i < u16NumOfEntry; i++)
+	{
+		u16Marker = MDrv_JPEG_Tiff_EndianChangeS(MDrv_JPEG_GetU16(pNextIfd));
+		u32Len = MDrv_JPEG_Tiff_EndianChangeL(MDrv_JPEG_GetU32(pNextIfd + 4));
+		u32tmp = MDrv_JPEG_Tiff_EndianChangeL(MDrv_JPEG_GetU32(pNextIfd + 8));
+
+		switch (u16Marker)
+		{
+			case JPEG_TIFF_JPEG_IMG_BYTES:
+				_u16ThumbnailSize = u32tmp;
+				break;
+			case JPEG_TIFF_SOI_OFFSET:
+				_bThumbnailFound= 1;
+				_u32ThumbnailOffset += u32tmp;
+				break;
+		}
+
+		pNextIfd += 12;
+	}
+
+	// Boundary check, prevent from buffer over-run
+	if(_bThumbnailFound)
+	{
+		if((_u32ThumbnailOffset + _u16ThumbnailSize) > data_length)
+			_bThumbnailFound = 0;
+
+		// means it only contains SOI header..
+		if(_u16ThumbnailSize<=2)
+			_bThumbnailFound = 0;
+	}
+
+	return _bThumbnailFound;
+}
+
+static U32 MDrv_JPEG_read_app1_marker( void )
+{
+	U16 length;
+	U8 *exif_buffer = (U8 *) INTERNAL_BUFFER_ADDR;
+	U16 i = 0;
+
+	JPEG_PRINT("APP1\n");
+
+	length = (U16)((MDrv_JPEG_get_char()<<8)+MDrv_JPEG_get_char());
+
+	if ( length < 2 )
+	{
+		return 0;
+	}
+
+	length -= 2;
+
+	while((length - i)!=0)
+	{
+		exif_buffer[i] = (U8) MDrv_JPEG_get_char();
+		i++;
+	}
+
+	if(MDrv_JPEG_DecodeExifInfo(exif_buffer, length)==1)
+	{
+		JPEG_PRINT("FOUND THUMBNAIL!\n");
+		_u32ThumbnailBufferOffset = _u32ThumbnailOffset;
+		_u16ThumbnailBufferSize = _u16ThumbnailSize;
+	}
+	else
+	{
+		JPEG_PRINT("NO THUMBNAIL!\n");
+	}
+	return 1;
+}
+
+static void MDrv_JPEG_skip_bytes(U32 count)
+{
+	while(count!=0)
+	{
+		// Any bytes remaining in buffer?
+		if ( !_u32In_buf_left )
+		{
+			// Try to get more bytes.
+			//MDrv_JPEG_fill_read_buffer();
+			// Still nothing to get?
+			if ( !_u32In_buf_left )
+			{
+				// should not happen
+				break;
+			}
+		}
+
+		if(count<_u32In_buf_left)
+		{
+			_u32In_buf_left -= count;
+			_pu8In_buf_ofs += count;
+			count = 0;
+		}
+		else
+		{
+			count -= _u32In_buf_left;
+			_u32In_buf_left = 0;
+		}
+	}
+}
+
+static U32 MDrv_JPEG_skip_variable_marker( void )
+{
+	U32 left;
+
+	JPEG_PRINT("SKIP markers\n");
+
+	left = (U16)((MDrv_JPEG_get_char()<<8)+MDrv_JPEG_get_char());
+
+	if ( left < 2 )
+	{
+		return 0 ;
+	}
+
+	left -= 2;
+
+	MDrv_JPEG_skip_bytes(left);
+	return 1 ;
+}
+
+static U32 MDrv_JPEG_read_dht_marker( void )
+{
+	U16 i, index, count;
+	U32 left;
+	U8 u8Huff_num[17];
+	U8 u8Huff_val[256];
+
+	JPEG_PRINT("DHT\n");
+
+	left = (U16)((MDrv_JPEG_get_char()<<8)+MDrv_JPEG_get_char());
+
+	if ( left < 2 )
+	{
+		return 0 ;
+	}
+
+	left -= 2;
+
+	while ( left )
+	{
+		// set it to zero, initialize
+		memset(u8Huff_num, 0, 17);
+		memset(u8Huff_val, 0, 256);
+
+		index = MDrv_JPEG_get_char();
+
+		u8Huff_num[0] = 0;
+
+		count = 0;
+
+		for ( i = 1; i <= 16; i++ )
+		{
+			u8Huff_num[i] = MDrv_JPEG_get_char();
+			count += u8Huff_num[i];
+		}
+
+		if ( count > 255 )
+		{
+			//MDrv_JPEG_terminate( JPEG_BAD_DHT_COUNTS );
+			return 0;
+		}
+
+		for ( i = 0; i < count; i++ )
+		{
+			u8Huff_val[i] = MDrv_JPEG_get_char();
+		}
+
+		i = 1 + 16 + count;
+
+		if ( left < ( U32 )i )
+		{
+			//MDrv_JPEG_terminate( JPEG_BAD_DHT_MARKER );
+			return 0;
+		}
+
+		left -= i;
+
+		if ( ( index & 0x10 ) > 0x10 ) //no need ???
+		{
+			//MDrv_JPEG_terminate( JPEG_BAD_DHT_INDEX );
+			return 0;
+		}
+
+		index = ( index & 0x0F ) + ( ( index & 0x10 ) >> 4 ) * ( JPEG_MAXHUFFTABLES >> 1 ); //???
+
+		if ( index >= JPEG_MAXHUFFTABLES )
+		{
+			//MDrv_JPEG_terminate( JPEG_BAD_DHT_INDEX );
+			return 0;
+		}
+
+		if(_Huff_info[index].bValid==0)
+			_Huff_info[index].bValid = 1;
+
+		memcpy( _Huff_info[index].u8Huff_num, u8Huff_num, 17 );
+		memcpy( _Huff_info[index].u8Huff_val, u8Huff_val, 256 );
+
+		// Compute the inverse order of HuffNum. this step is only needed in JPD mode (baseline)
+		for(i = 1; i<=16; i++)
+		{
+			if(u8Huff_num[17 - i]!=0)
+			{
+				count = count - u8Huff_num[17 - i];
+				u8Huff_num[17 - i] = count;
+			}
+			else
+				u8Huff_num[17 - i] = 0xFF;
+		}
+		memcpy( _Huff_info[index].u8Symbol, u8Huff_num, 17 );
+
+	}
+	return 1;
+}
+
+static U32 MDrv_JPEG_read_dqt_marker( void )
+{
+	U16 n, i, prec;
+	U32 left;
+	U32 temp;
+
+	//jpeg_print("DQT\n");
+
+	left = (U16)((MDrv_JPEG_get_char()<<8)+MDrv_JPEG_get_char());
+
+	if ( left < 2 )
+	{
+		//MDrv_JPEG_terminate( JPEG_BAD_DQT_MARKER );
+		return 0;
+	}
+
+	left -= 2;
+
+	while ( left )
+	{
+		n = MDrv_JPEG_get_char();
+		prec = n >> 4;
+		n &= 0x0F;
+
+		if ( n >= JPEG_MAXQUANTTABLES )
+		{
+			//MDrv_JPEG_terminate( JPEG_BAD_DQT_TABLE );
+			return 0;
+		}
+
+		if(_QuantTables[n].bValid==0)
+			_QuantTables[n].bValid = 1;
+
+		// read quantization entries, in zag order
+		for ( i = 0; i < 64; i++ )
+		{
+			temp = MDrv_JPEG_get_char();
+
+			if ( prec )
+			{
+				temp = ( temp << 8 ) + MDrv_JPEG_get_char();
+			}
+
+			_QuantTables[n].s16Value[i] = temp;
+
+			//jpeg_print("_QuantTables[%d].s16Value[%d]= %X\n", n, i, _QuantTables[n].s16Value[i]);
+		}
+
+		i = 64 + 1;
+
+		if ( prec )
+		{
+			i += 64;
+		}
+
+		if ( left < ( U32 )i )
+		{
+			//MDrv_JPEG_terminate( JPEG_BAD_DQT_LENGTH );
+			return 0;
+		}
+
+		left -= i;
+	}
+	return 1;
+}
+
+static U32 MDrv_JPEG_read_dri_marker( void )
+{
+	JPEG_PRINT("DRI\n");
+
+	if ( (U16)((MDrv_JPEG_get_char()<<8)+MDrv_JPEG_get_char()) != 4 )
+	{
+		//MDrv_JPEG_terminate( JPEG_BAD_DRI_LENGTH );
+		return 0;
+	}
+
+	_u16Restart_interval = (U16)((MDrv_JPEG_get_char()<<8)+MDrv_JPEG_get_char());    return 1;
+}
+
+static U32 MDrv_JPEG_process_markers( void )
+{
+	U32 c;
+
+	for ( ; ; )
+	{
+		c = MDrv_JPEG_next_marker();
+
+		switch ( c )
+		{
+			case M_APP1:
+				// Prevent from there's thumbnail in thumbnail... & multiple APP1
+				// Although it's impossible.. =_=
+				if( (_u8DecodeType==JPEG_TYPE_THUMBNAIL) && (_bThumbnailFound==0) )
+				{
+					if( !MDrv_JPEG_read_app1_marker() )
+						return 0;
+				}
+				else
+				{
+					MDrv_JPEG_skip_variable_marker();
+					//MDrv_JPEG_read_app1_marker();
+				}
+				break;
+			case M_SOF0:
+			case M_SOF1:
+			case M_SOF2:
+			case M_SOF3:
+			case M_SOF5:
+			case M_SOF6:
+			case M_SOF7:
+				//      case M_JPG:
+			case M_SOF9:
+			case M_SOF10:
+			case M_SOF11:
+			case M_SOF13:
+			case M_SOF14:
+			case M_SOF15:
+			case M_SOI:
+			case M_EOI:
+			case M_SOS:
+				{
+					return c;
+				}
+			case M_DHT:
+				{
+					if( !MDrv_JPEG_read_dht_marker() )
+						return 0;
+					break;
+				}
+				// Sorry, no arithmitic support at this time. Dumb patents!
+			case M_DAC:
+				{
+					return 0;
+					break;
+				}
+			case M_DQT:
+				{
+					if( !MDrv_JPEG_read_dqt_marker() )
+						return 0;
+					break;
+				}
+			case M_DRI:
+				{
+					if( !MDrv_JPEG_read_dri_marker() )
+						return 0;
+					break;
+				}
+				//case M_APP0:  /* no need to read the JFIF marker */
+
+			case M_JPG:
+			case M_RST0:
+				/* no parameters */
+			case M_RST1:
+			case M_RST2:
+			case M_RST3:
+			case M_RST4:
+			case M_RST5:
+			case M_RST6:
+			case M_RST7:
+			case M_TEM:
+				{
+					return 0;
+				}
+			default:
+				/* must be DNL, DHP, EXP, APPn, JPGn, COM, or RESn or APP0 */
+				{
+					MDrv_JPEG_skip_variable_marker();
+					break;
+				}
+		}
+	}
+	return 1;
+}
+
+static U8 _u8Precision;
+
+//------------------------------------------------------------------------------
+#define JPEG_MAX_HEIGHT 1080*8
+#define JPEG_MAX_WIDTH  1920*8
+
+static U32 MDrv_JPEG_read_sof_marker( void )
+{
+	U8 i,tmp;
+	U32 left;
+
+	JPEG_PRINT("SOF\n");
+
+	left = (U16)((MDrv_JPEG_get_char()<<8)+MDrv_JPEG_get_char());
+	_u8Precision = MDrv_JPEG_get_char();
+
+	if ( _u8Precision != 8 )   /* precision: sorry, only 8-bit precision is supported right now */
+	{
+		//MDrv_JPEG_terminate( JPEG_BAD_PRECISION );
+		return 0;
+	}
+
+	_u16Image_y_size = (U16)((MDrv_JPEG_get_char()<<8)+MDrv_JPEG_get_char());
+
+	if ( ( _u16Image_y_size < 1 ) || ( _u16Image_y_size > JPEG_MAX_HEIGHT ) )
+	{
+		//MDrv_JPEG_terminate( JPEG_BAD_HEIGHT );
+		return 0;
+	}
+
+	_u16Image_x_size = (U16)((MDrv_JPEG_get_char()<<8)+MDrv_JPEG_get_char());
+
+
+	if ( ( _u16Image_x_size < 1 ) || ( _u16Image_x_size > JPEG_MAX_WIDTH ) )
+	{
+		//MDrv_JPEG_terminate( JPEG_BAD_WIDTH );
+		return 0;
+	}
+
+	_u8Comps_in_frame = MDrv_JPEG_get_char();
+
+	if ( _u8Comps_in_frame > JPEG_MAXCOMPONENTS )
+	{
+		//MDrv_JPEG_terminate( JPEG_TOO_MANY_COMPONENTS );
+		return 0;
+	}
+
+	if ( left != ( U32 )( _u8Comps_in_frame * 3 + 8 ) )
+	{
+		//MDrv_JPEG_terminate( JPEG_BAD_SOF_LENGTH );
+		return 0;
+	}
+
+	for ( i = 0; i < _u8Comps_in_frame; i++ )
+	{
+		_u8Comp_ident[i] = MDrv_JPEG_get_char();
+		if(_u8Comp_ident[i]==0)     // The component ID is start from 0 (0 1 2). The normal case is start from 1 (1 2 3) for YUV
+		{
+			_u8LumaCi = 0;
+			_u8ChromaCi = 1;
+		}
+		tmp  = MDrv_JPEG_get_char();
+		_u8Comp_h_samp[i] = (tmp & 0xF0)>>4;
+		_u8Comp_v_samp[i] = (tmp & 0x0F);
+
+		_u8Comp_quant[i] = MDrv_JPEG_get_char();
+	}
+	return 1;
+}
+
+static U32 G_MDrv_JPEG_locate_sof_marker( void )
+{
+	U32 c;
+
+	if( !G_MDrv_JPEG_locate_soi_marker() )
+		return 0;
+
+	c = MDrv_JPEG_process_markers();
+
+	if( c == 0 )
+		return 0;
+
+	switch ( c )
+	{
+		case M_SOF2:
+			JPEG_PRINT("Progressive\n");
+			_bProgressive_flag = 1;
+		case M_SOF0:
+			/* baseline DCT */
+		case M_SOF1:
+			/* extended sequential DCT */
+			{
+				if(c==M_SOF0||c==M_SOF1)
+				{
+					JPEG_PRINT("Baseline\n");
+				}
+				if( !MDrv_JPEG_read_sof_marker() )
+					return 0;
+				break;
+			}
+		case M_SOF9:
+			/* Arithmetic coding */
+			{
+				return 0;
+			}
+
+		default:
+			{
+				return 0;
+			}
+	}
+	return 1;
+}
+
+static int G_MDrv_JPEG_decode_init( void )
+{
+	U16 u16ImageXSize, u16ImageYSize;
+
+	G_MDrv_JPEG_init();
+
+	if( !G_MDrv_JPEG_locate_sof_marker() )
+		return 0;
+
+	// save the original image size
+	_u16OriginalImage_x_size = u16ImageXSize = _u16Image_x_size;
+	_u16OriginalImage_y_size = u16ImageYSize = _u16Image_y_size;
+
+	if(_bProgressive_flag)
+	{
+		if( _u16Image_x_size*_u16Image_y_size*3*2 > INTERNAL_BUFFER_SIZE )
+		{
+			JPEG_PRINT("Progressive image size too big... do not handle it\n");
+			return 0;
+		}
+	}
+
+	return 1;
+}
+
+int G_MDrv_JPEG_constructor( U8 decode_type )
+{
+
+	_u8DecodeType = decode_type;
+	if( !G_MDrv_JPEG_decode_init() )
+		return 0;
+
+	return 1;
+}
+
+//------------------------------------------------------------------------------
+// SCAN TYPE
+#define JPEG_GRAYSCALE 0
+#define JPEG_YH1V1     1
+#define JPEG_YH2V1     2
+#define JPEG_YH1V2     3
+#define JPEG_YH2V2     4
+#define JPEG_YH4V1     5
+
+//------------------------------------------------------------------------------
+// Increase this if you increase the max width!
+#define JPEG_MAXBLOCKSPERROW 6144
+
+static U32 MDrv_JPEG_init_frame( void ) //ok
+{
+
+	if ( _u8Comps_in_frame == 1 )
+	{
+		gu8Scan_type = JPEG_GRAYSCALE;
+
+		_u16Max_blocks_per_mcu = 1;
+
+		gu8Max_mcu_x_size = 8;
+		gu8Max_mcu_y_size = 8;
+	}
+	else if ( _u8Comps_in_frame == 3 )
+	{
+		if ( ( ( _u8Comp_h_samp[1] != 1 ) || ( _u8Comp_v_samp[1] != 1 ) ) ||   //support only U_H1V1 & V_H1V1
+				( ( _u8Comp_h_samp[2] != 1 ) || ( _u8Comp_v_samp[2] != 1 ) ) )
+		{
+			//MDrv_JPEG_terminate( JPEG_UNSUPPORTED_SAMP_FACTORS );
+			return 0;
+		}
+
+		if ( ( _u8Comp_h_samp[0] == 1 ) && ( _u8Comp_v_samp[0] == 1 ) )
+		{
+			gu8Scan_type = JPEG_YH1V1; //4:4:4
+
+			_u16Max_blocks_per_mcu = 3;
+
+			gu8Max_mcu_x_size = 8;
+			gu8Max_mcu_y_size = 8;
+		}
+		else if ( ( _u8Comp_h_samp[0] == 2 ) && ( _u8Comp_v_samp[0] == 1 ) )
+		{
+			gu8Scan_type = JPEG_YH2V1; //4:2:2
+
+			_u16Max_blocks_per_mcu = 4;
+
+			gu8Max_mcu_x_size = 16;
+			gu8Max_mcu_y_size = 8;
+		}
+		else if ( ( _u8Comp_h_samp[0] == 1 ) && ( _u8Comp_v_samp[0] == 2 ) )
+		{
+			gu8Scan_type = JPEG_YH1V2;
+
+			_u16Max_blocks_per_mcu = 4;
+
+			gu8Max_mcu_x_size = 8;
+			gu8Max_mcu_y_size = 16;
+		}
+		else if ( ( _u8Comp_h_samp[0] == 2 ) && ( _u8Comp_v_samp[0] == 2 ) )
+		{
+			gu8Scan_type = JPEG_YH2V2; //4:2:0
+
+			_u16Max_blocks_per_mcu = 6;
+
+			gu8Max_mcu_x_size = 16;
+			gu8Max_mcu_y_size = 16;
+		}
+		else if ( ( _u8Comp_h_samp[0] == 4 ) && ( _u8Comp_v_samp[0] == 1 ) )
+		{
+			// 4:1:1
+			gu8Scan_type = JPEG_YH4V1;
+
+			_u16Max_blocks_per_mcu = 6;
+
+			gu8Max_mcu_x_size = 32;
+			gu8Max_mcu_y_size = 8;
+			//#if CMODEL
+			//MDrv_JPEG_terminate( JPEG_UNSUPPORTED_SAMP_FACTORS );
+			//#endif
+		}
+		else
+		{
+			//MDrv_JPEG_terminate( JPEG_UNSUPPORTED_SAMP_FACTORS );
+			return 0;
+		}
+	}
+	else
+	{
+		//MDrv_JPEG_terminate( JPEG_UNSUPPORTED_COLORSPACE );
+		return 0;
+	}
+
+	gu16Max_mcus_per_row = ( _u16Image_x_size + ( gu8Max_mcu_x_size - 1 ) ) / gu8Max_mcu_x_size;
+	_u16Max_mcus_per_col = ( _u16Image_y_size + ( gu8Max_mcu_y_size - 1 ) ) / gu8Max_mcu_y_size;
+
+	_u32Max_blocks_per_row = gu16Max_mcus_per_row * _u16Max_blocks_per_mcu;
+
+	// Should never happen
+	if ( _u32Max_blocks_per_row > JPEG_MAXBLOCKSPERROW )
+	{
+		//MDrv_JPEG_terminate( JPEG_ASSERTION_ERROR );
+		return 0;
+	}
+
+#if SUPPORT_PROGRESSIVE_MODE
+	_u16Total_lines_left = _u16Max_mcus_per_col * gu8Max_mcu_y_size;
+	gu16Mcu_lines_left = 0;
+#endif
+	return 1;
+}
+
+static void *G_MDrv_JPEG_malloc (U32 size)
+{
+	__memp__ q;			/* ptr to free block */
+	__memp__ p;			/* q->next */
+	U32 k;			/* space remaining in the allocated block */
+	q = &AVAIL;
+
+	while (1)
+	{
+		if ((p = q->next) == NULL)
+		{
+			return (NULL);				/* FAILURE */
+		}
+
+		if (p->len >= size)
+			break;
+
+		q = p;
+	}
+
+	k = p->len - size;		/* calc. remaining bytes in block */
+
+	if (k < MIN_BLOCK)		/* rem. bytes too small for new block */
+	{
+		q->next = p->next;
+		return (&p[1]);				/* SUCCESS */
+	}
+
+	k -= HLEN;
+	p->len = k;
+
+	q = (__memp__ ) (((char *) (&p [1])) + k);
+	q->len = size;
+	q->next = NULL;
+
+	return (&q[1]);					/* SUCCESS */
+}
+
+static void * alloc( U32 n )
+{
+	U8 i;
+	void *q;
+
+	// Find a free slot. The number of allocated slots will
+	// always be very low, so a linear search is good enough.
+	for ( i = 0; i < JPEG_MAXBLOCKS; i++ )
+	{
+		if ( _pBlocks[i] == NULL )
+		{
+			break;
+		}
+	}
+
+	if ( i == JPEG_MAXBLOCKS )
+	{
+		//MDrv_JPEG_terminate( JPEG_TOO_MANY_BLOCKS );
+		return NULL;
+	}
+
+	//FixMe: eCos does not support aligned allocate ???
+	q = G_MDrv_JPEG_malloc( n + 8 );
+	//q = MsOS_AllocateAlignedMemory(n+8, 8, gs32CachedPoolID);
+	//q = MsOS_AllocateMemory(n+8, gs32CachedPoolID);
+
+	if ( q == NULL )
+	{
+		//MDrv_JPEG_terminate( JPEG_NOTENOUGHMEM );
+		return NULL;
+	}
+
+	memset( q, 0, n + 8 );
+
+	_pBlocks[i] = q;
+
+	JPEG_PRINT("JPEG %d bytes allocated\n", n);
+
+	return ( ( void* )q );
+}
+
+static PCOEFF_BUF MDrv_JPEG_coeff_buf_open( U16 block_num_x, U16 block_num_y, U8 block_len_x, U8 block_len_y )
+{
+	PCOEFF_BUF cb = ( PCOEFF_BUF )alloc( sizeof( COEFF_BUF ) );
+	if(cb == NULL)
+	{
+		//MDrv_JPEG_terminate( JPEG_NOTENOUGHMEM );
+		return NULL;
+	}
+	cb->u16Block_num_x = block_num_x;
+	cb->u16Block_num_y = block_num_y;
+
+	cb->u8Block_len_x = block_len_x;
+	cb->u8Block_len_y = block_len_y;
+
+	cb->u16Block_size = ( block_len_x * block_len_y ) * sizeof( BLOCK_TYPE );
+
+	cb->pu8Data = ( U8 * )alloc( cb->u16Block_size * block_num_x * block_num_y );
+	if(cb->pu8Data == NULL)
+	{
+		//MDrv_JPEG_terminate( JPEG_NOTENOUGHMEM );
+	}
+
+	return cb;
+}
+
+static void G_MDrv_JPEG_free (void *memp)
+{
+	__memp__ q;		/* ptr to free block */
+	__memp__ p;		/* q->next */
+	__memp__ p0;		/* block to free */
+
+	if ((memp == NULL) || (AVAIL.len == 0))
+		return;
+
+	p0 = (__memp__) memp;
+	p0 = &p0 [-1];		/* get address of header */
+
+	q = &AVAIL;
+
+	while (1)
+	{
+		p = q->next;
+
+		if ((p == NULL) || (p > (__memp__) memp))
+			break;
+
+		q = p;
+	}
+
+	if ((p != NULL) && ((((char *)memp) + p0->len) == (char *)p))
+	{
+		p0->len += p->len + HLEN;
+		p0->next = p->next;
+	}
+	else
+	{
+		p0->next = p;
+	}
+
+	if ((((char *)q) + q->len + HLEN) == (char *)p0)
+	{
+		q->len += p0->len + HLEN;
+		q->next = p0->next;
+	}
+	else
+	{
+		q->next = p0;
+	}
+}
+
+static void MDrv_JPEG_free_all_blocks( void )
+{
+	U8 i;
+
+	for ( i = 0; i < JPEG_MAXBLOCKS; i++ )
+	{
+		if( _pBlocks[i]!=NULL )
+			G_MDrv_JPEG_free( _pBlocks[i] );  //need to check    sharon
+
+		_pBlocks[i] = NULL;
+	}
+}
+
+// Completely destroys the decoder object. May be called at any time.
+static void G_MDrv_JPEG_Finalize( void )
+{
+	MDrv_JPEG_free_all_blocks();
+}
+
+typedef unsigned int ( *Pdecode_block_func )( U8, U16, U16 );
+
+static U32 MDrv_JPEG_read_sos_marker( void )
+{
+	U32 left;
+	U16 i, ci, n, c, cc;
+	U8 tmp;
+
+	JPEG_PRINT("SOS\n");
+
+	left = (U16)((MDrv_JPEG_get_char()<<8)+MDrv_JPEG_get_char());
+
+	n = MDrv_JPEG_get_char();
+
+	_u8Comps_in_scan = n;
+
+	left -= 3;
+
+	if ( ( left != ( U32 )( n * 2 + 3 ) ) || ( n < 1 ) || ( n > JPEG_MAXCOMPSINSCAN ) )
+	{
+		//MDrv_JPEG_terminate( JPEG_BAD_SOS_LENGTH );
+		return 0;
+	}
+
+	for ( i = 0; i < n; i++ )
+	{
+		cc = MDrv_JPEG_get_char();
+		c = MDrv_JPEG_get_char();
+		left -= 2;
+
+		for ( ci = 0; ci < _u8Comps_in_frame; ci++ )
+		{
+			if ( cc == _u8Comp_ident[ci] )
+			{
+				break;
+			}
+		}
+
+		if ( ci >= _u8Comps_in_frame )
+		{
+			//MDrv_JPEG_terminate( JPEG_BAD_SOS_COMP_ID );
+			return 0;
+		}
+
+		_u8Comp_list[i] = ci;
+		_u8Comp_dc_tab[ci] = ( c >> 4 ) & 15;
+		_u8Comp_ac_tab[ci] = ( c & 15 ) + ( JPEG_MAXHUFFTABLES >> 1 );
+	}
+
+	_u8Spectral_start = MDrv_JPEG_get_char();
+	_u8Spectral_end = MDrv_JPEG_get_char();
+	tmp = MDrv_JPEG_get_char();
+	_u8Successive_high = (tmp & 0xF0) >> 4;
+	_u8Successive_low = (tmp & 0x0F);
+
+	if ( !_bProgressive_flag )
+	{
+		_u8Spectral_start = 0;
+		_u8Spectral_end = 63;
+	}
+
+	left -= 3;
+	MDrv_JPEG_skip_bytes(left);                 /* read past whatever is left */
+
+	return 1;
+}
+
+static U32 MDrv_JPEG_locate_sos_marker( void )
+{
+	U32 c;
+
+	c = MDrv_JPEG_process_markers();
+
+	if( c == 0 )
+		return 0;
+
+	if ( c == M_EOI )
+	{
+		return 0;
+	}
+	else if ( c != M_SOS )
+	{
+		//MDrv_JPEG_terminate( JPEG_UNEXPECTED_MARKER );
+		return 0;
+	}
+
+	if( !MDrv_JPEG_read_sos_marker())
+		return 0;
+
+	return 1;
+}
+
+static void MDrv_JPEG_calc_mcu_block_order( void ) //ok
+{
+	U8 component_num, component_id;
+	U8 max_h_samp = 0, max_v_samp = 0;
+
+	for ( component_id = 0; component_id < _u8Comps_in_frame; component_id++ )
+	{
+		if ( _u8Comp_h_samp[component_id] > max_h_samp )
+		{
+			max_h_samp = _u8Comp_h_samp[component_id];
+		}
+
+		if ( _u8Comp_v_samp[component_id] > max_v_samp )
+		{
+			max_v_samp = _u8Comp_v_samp[component_id];
+		}
+	}
+
+	for ( component_id = 0; component_id < _u8Comps_in_frame; component_id++ )
+	{
+		_u16Comp_h_blocks[component_id] = ( ( ( ( _u16Image_x_size * _u8Comp_h_samp[component_id] ) + ( max_h_samp - 1 ) ) / max_h_samp ) + 7 ) / 8;
+		_u16Comp_v_blocks[component_id] = ( ( ( ( _u16Image_y_size * _u8Comp_v_samp[component_id] ) + ( max_v_samp - 1 ) ) / max_v_samp ) + 7 ) / 8;
+	}
+
+	if ( _u8Comps_in_scan == 1 )
+	{
+		_u16Mcus_per_row = _u16Comp_h_blocks[_u8Comp_list[0]];
+		_u16Mcus_per_col = _u16Comp_v_blocks[_u8Comp_list[0]];
+	}
+	else
+	{
+		_u16Mcus_per_row = ( ( ( _u16Image_x_size + 7 ) / 8 ) + ( max_h_samp - 1 ) ) / max_h_samp;
+		_u16Mcus_per_col = ( ( ( _u16Image_y_size + 7 ) / 8 ) + ( max_v_samp - 1 ) ) / max_v_samp;
+	}
+
+	if ( _u8Comps_in_scan == 1 )
+	{
+		_u8Mcu_org[0] = _u8Comp_list[0];
+
+		_u8Blocks_per_mcu = 1;
+	}
+	else
+	{
+		_u8Blocks_per_mcu = 0;
+
+		for ( component_num = 0; component_num < _u8Comps_in_scan; component_num++ )
+		{
+			U8 num_blocks;
+
+			component_id = _u8Comp_list[component_num];
+
+			num_blocks = _u8Comp_h_samp[component_id] * _u8Comp_v_samp[component_id];
+
+			while ( num_blocks-- )
+			{
+				_u8Mcu_org[_u8Blocks_per_mcu++] = component_id;
+			}
+		}
+	}
+}
+
+static U32 MDrv_JPEG_make_huff_table( U8 index)
+{
+	U16 p, i, l, si;
+	U8 huffsize[257];
+	U16 huffcode[257];
+	U16 code;
+	U16 subtree;
+	U16 code_size;
+	U16 lastp;
+	S16 nextfreeentry;
+	S16 currententry;
+
+#if SUPPORT_PROGRESSIVE_MODE
+	PHUFF_TABLES hs = &_Huff_tbls[index];
+#endif
+
+	memset(huffsize, 0, sizeof(huffsize));
+	memset(huffcode, 0, sizeof(huffcode));
+
+	p = 0;
+
+	for ( l = 1; l <= 16; l++ )
+	{
+		for ( i = 1; i <= _Huff_info[index].u8Huff_num[l]; i++ )
+		{
+			huffsize[p++] = l;
+
+			//kevinhuang, add protection
+			if ( p >= 257 )
+			{
+				//MDrv_JPEG_terminate( JPEG_UNDEFINED_HUFF_TABLE );
+				return 0;
+			}
+		}
+	}
+
+	huffsize[p] = 0;
+
+	lastp = p;
+
+	code = 0;
+	si = huffsize[0];
+	p = 0;
+
+	while ( huffsize[p] )
+	{
+		while ( huffsize[p] == si )
+		{
+			huffcode[p++] = code;
+			code++;
+
+			//kevinhuang, add protection
+			if ( p >= 257 )
+			{
+				//MDrv_JPEG_terminate( JPEG_UNDEFINED_HUFF_TABLE );
+				return 0;
+			}
+		}
+
+		code <<= 1;
+		si++;
+	}
+
+	// Calculate the min code
+	for(i = 1; i<=16; i++)
+		_Huff_info[index].u16Code[i] = huffcode[_Huff_info[index].u8Symbol[i]] << (15 - (i - 1));
+
+#if SUPPORT_PROGRESSIVE_MODE
+	// In JPD mode, SW doesn't need huff table when baseline decoding
+	if(_bProgressive_flag == 0)
+		return 1;
+
+	memset( hs->s16Look_up, 0, sizeof( hs->s16Look_up ) );
+	memset( hs->s16Tree, 0, sizeof( hs->s16Tree ) );
+	memset( hs->u8Code_size, 0, sizeof( hs->u8Code_size ) );
+
+	nextfreeentry = -1;
+
+	p = 0;
+
+	while ( p < lastp )
+	{
+		i = _Huff_info[index].u8Huff_val[p];
+		code = huffcode[p];
+		code_size = huffsize[p];
+
+		hs->u8Code_size[i] = code_size;
+
+		if ( code_size <= 8 )
+		{
+			code <<= ( 8 - code_size );
+
+			for ( l = 1 << ( 8 - code_size ); l > 0; l-- )
+			{
+				hs->s16Look_up[code] = i;
+				code++;
+			}
+		}
+		else
+		{
+			subtree = ( code >> ( code_size - 8 ) ) & 0xFF;
+
+			currententry = hs->s16Look_up[subtree];
+
+			if ( currententry == 0 )
+			{
+				hs->s16Look_up[subtree] = currententry = nextfreeentry;
+
+				nextfreeentry -= 2;
+			}
+
+			code <<= ( 16 - ( code_size - 8 ) );
+
+			for ( l = code_size; l > 9; l-- )
+			{
+				if ( ( code & 0x8000 ) == 0 )
+				{
+					currententry--;
+				}
+
+				if ( hs->s16Tree[-currententry - 1] == 0 )
+				{
+					hs->s16Tree[-currententry - 1] = nextfreeentry;
+
+					currententry = nextfreeentry;
+
+					nextfreeentry -= 2;
+				}
+				else
+				{
+					currententry = hs->s16Tree[-currententry - 1];
+				}
+
+				code <<= 1;
+			}
+
+			if ( ( code & 0x8000 ) == 0 )
+			{
+				currententry--;
+			}
+
+			hs->s16Tree[-currententry - 1] = i;
+		}
+
+		p++;
+	}
+#endif  //SUPPORT_PROGRESSIVE_MODE
+	return 1;
+}
+
+static U32 MDrv_JPEG_check_huff_tables( void )
+{
+	U8 i;
+
+	for ( i = 0; i < _u8Comps_in_scan; i++ )
+	{
+		if ( ( _u8Spectral_start == 0 ) && ( _Huff_info[_u8Comp_dc_tab[_u8Comp_list[i]]].bValid== 0 ) )
+		{
+			//MDrv_JPEG_terminate( JPEG_UNDEFINED_HUFF_TABLE );
+			return 0;
+		}
+
+		if ( ( _u8Spectral_end > 0 ) && ( _Huff_info[_u8Comp_ac_tab[_u8Comp_list[i]]].bValid== 0 ) )
+		{
+			//MDrv_JPEG_terminate( JPEG_UNDEFINED_HUFF_TABLE );
+			return 0;
+		}
+	}
+
+	for ( i = 0; i < JPEG_MAXHUFFTABLES; i++ )
+	{
+		if ( _Huff_info[i].bValid )
+		{
+			if( !MDrv_JPEG_make_huff_table(i))
+				return 0;
+		}
+	}
+	return 1;
+}
+
+static U32 MDrv_JPEG_check_quant_tables( void ) //ok
+{
+	U8 i;
+
+	for ( i = 0; i < _u8Comps_in_scan; i++ )
+	{
+		if ( _QuantTables[_u8Comp_quant[_u8Comp_list[i]]].bValid==0 )
+		{
+			//MDrv_JPEG_terminate( JPEG_UNDEFINED_QUANT_TABLE );
+			return 0;
+		}
+	}
+	return 1;
+}
+
+static U32 G_MDrv_JPEG_GetECS(void)
+{
+	//jpeg_print("_u32Total_bytes_read = %08X\n",_u32Total_bytes_read);
+	//jpeg_print("_u32In_buf_left = %08X\n",_u32In_buf_left);
+	return (_u32Total_bytes_read - _u32In_buf_left);
+}
+
+//------------------------------------------------------------------------------
+// Logical rotate left operation.
+static U32 MDrv_JPEG_rol( U32 i, U8 j )
+{
+	return ( ( i << j ) | ( i >> ( 32 - j ) ) );
+}
+
+static U8 MDrv_JPEG_get_charP( U32 *Ppadding_flag )
+{
+	U8 t;
+	U8 c;
+
+	if ( !_u32In_buf_left )
+	{
+		//MDrv_JPEG_fill_read_buffer();
+		if ( !_u32In_buf_left )
+		{
+			*Ppadding_flag = 1;
+			t = _u8Tem_flag;
+			_u8Tem_flag ^= 1;
+			if ( t )
+			{
+				return ( 0xD9 );
+			}
+			else
+			{
+				return ( 0xFF );
+			}
+		}
+	}
+
+	*Ppadding_flag = 0;
+
+	c = *_pu8In_buf_ofs++;
+	_u32In_buf_left--;
+
+	return ( c );
+}
+
+//------------------------------------------------------------------------------
+// Inserts a previously retrieved character back into the input buffer.
+static void MDrv_JPEG_stuff_char( U8 q )
+{
+	*( --_pu8In_buf_ofs ) = q;
+	_u32In_buf_left++;
+}
+
+static U8 MDrv_JPEG_get_octet( void )
+{
+	U32 padding_flag;
+	U8 c = MDrv_JPEG_get_charP( &padding_flag );
+
+	if ( c == 0xFF )
+	{
+		if ( padding_flag )
+		{
+			return ( 0xFF );
+		}
+
+		c = MDrv_JPEG_get_charP( &padding_flag );
+		if ( padding_flag )
+		{
+			MDrv_JPEG_stuff_char( 0xFF );
+			return ( 0xFF );
+		}
+
+		if ( c == 0x00 )
+		{
+			return ( 0xFF );
+		}
+		else
+		{
+			MDrv_JPEG_stuff_char( c );
+			MDrv_JPEG_stuff_char( 0xFF );
+			return ( 0xFF );
+		}
+	}
+
+	return ( c );
+}
+
+static U32 MDrv_JPEG_get_bits_2( U8 numbits )
+{
+	U32 i, c1, c2;
+
+	i = ( _u32Bit_buf >> ( 16 - numbits ) ) & ( ( 1 << numbits ) - 1 );
+
+	if ( ( _s16Bits_left -= numbits ) <= 0 )
+	{
+		_u32Bit_buf = MDrv_JPEG_rol( _u32Bit_buf, numbits += _s16Bits_left );
+
+		c1 = MDrv_JPEG_get_octet();
+		c2 = MDrv_JPEG_get_octet();
+
+		_u32Bit_buf = ( _u32Bit_buf & 0xFFFF ) | ( ( ( U32 )c1 ) << 24 ) | ( ( ( U32 )c2 ) << 16 );
+
+		_u32Bit_buf = MDrv_JPEG_rol( _u32Bit_buf, -_s16Bits_left );
+
+		_s16Bits_left += 16;
+	}
+	else
+	{
+		_u32Bit_buf = MDrv_JPEG_rol( _u32Bit_buf, numbits );
+	}
+
+	return i;
+}
+
+static U32 MDrv_JPEG_init_scan( void )
+{
+
+	if ( !MDrv_JPEG_locate_sos_marker() )
+	{
+		return 0;
+	}
+
+	MDrv_JPEG_calc_mcu_block_order();
+
+	if( !MDrv_JPEG_check_huff_tables() )
+		return 0;
+
+	if( !MDrv_JPEG_check_quant_tables() )
+		return 0;
+
+#if SUPPORT_PROGRESSIVE_MODE
+	memset( _u32Last_dc_val, 0, _u8Comps_in_frame * sizeof( U32 ) );
+
+	_u32EOB_run = 0;
+#endif
+
+	if ( _u16Restart_interval )
+	{
+		_u16Restarts_left = _u16Restart_interval;
+		_u16Next_restart_num = 0;
+	}
+
+	_Total_Decoded_Size = (S32)G_MDrv_JPEG_GetECS();
+
+	if(_bProgressive_flag)
+	{
+		// pre-fill bit buffer for later decoding
+		_s16Bits_left = 16;
+		MDrv_JPEG_get_bits_2( 16 );
+		MDrv_JPEG_get_bits_2( 16 );
+	}
+
+	return 1;
+}
+
+static BLOCK_TYPE * MDrv_JPEG_coeff_buf_getp( PCOEFF_BUF cb, U16 block_x, U16 block_y )
+{
+	if ( block_x >= cb->u16Block_num_x )
+	{
+		//MDrv_JPEG_terminate( JPEG_ASSERTION_ERROR );
+		return NULL;
+	}
+
+	if ( block_y >= cb->u16Block_num_y )
+	{
+		//MDrv_JPEG_terminate( JPEG_ASSERTION_ERROR );
+		return NULL;
+	}
+
+	return ( BLOCK_TYPE * )( cb->pu8Data + block_x * cb->u16Block_size + block_y * ( cb->u16Block_size * cb->u16Block_num_x ) );
+}
+
+static U32 MDrv_JPEG_decode_block_dc_refine( //JPEG_DECODER *Pd,
+		U8 component_id, U16 block_x, U16 block_y )
+{
+	if ( MDrv_JPEG_get_bits_2( 1 ) )
+	{
+		BLOCK_TYPE *p = MDrv_JPEG_coeff_buf_getp( _DC_Coeffs[component_id], block_x, block_y );
+
+		if(p == NULL)
+		{
+			//jpeg_print("%s [%d]\n", __FUNCTION__, __LINE__);
+			return 0;
+		}
+		p[0] |= ( 1 << _u8Successive_low );
+	}
+	return 1;
+}
+
+static S32 MDrv_JPEG_huff_decode( PHUFF_TABLES Ph )
+{
+	S32 symbol;
+
+	// Check first 8-bits: do we have a complete symbol?
+	if ( ( symbol = Ph->s16Look_up[( _u32Bit_buf >> 8 ) & 0xFF] ) < 0 )
+	{
+		// Decode more bits, use a tree traversal to find symbol.
+		MDrv_JPEG_get_bits_2( 8 );
+
+		do
+		{
+			symbol = Ph->s16Tree[~symbol + ( 1 - MDrv_JPEG_get_bits_2( 1 ) )];
+		}
+		while ( symbol < 0 );
+	}
+	else
+	{
+		MDrv_JPEG_get_bits_2( Ph->u8Code_size[symbol] );
+	}
+
+	return symbol;
+}
+
+//------------------------------------------------------------------------------
+// Tables and macro used to fully decode the DPCM differences.
+// (Note: In x86 asm this can be done without using tables.)
+static const S32 extend_test[16] =   /* entry n is 2**(n-1) */
+{
+	0, 0x0001, 0x0002, 0x0004, 0x0008, 0x0010, 0x0020, 0x0040,
+	0x0080, 0x0100, 0x0200, 0x0400, 0x0800, 0x1000, 0x2000, 0x4000
+};
+
+static const S32 extend_offset[16] = /* entry n is (-1 << n) + 1 */
+{
+	0, ( ( -1 ) << 1 ) + 1, ( ( -1 ) << 2 ) + 1, ( ( -1 ) << 3 ) + 1, ( ( -1 ) << 4 ) + 1,
+	( ( -1 ) << 5 ) + 1, ( ( -1 ) << 6 ) + 1, ( ( -1 ) << 7 ) + 1, ( ( -1 ) << 8 ) + 1,
+	( ( -1 ) << 9 ) + 1, ( ( -1 ) << 10 ) + 1, ( ( -1 ) << 11 ) + 1, ( ( -1 ) << 12 ) + 1,
+	( ( -1 ) << 13 ) + 1, ( ( -1 ) << 14 ) + 1, ( ( -1 ) << 15 ) + 1
+};
+
+// used by huff_extend()
+static const S32 extend_mask[] =
+{
+	0, ( 1 << 0 ), ( 1 << 1 ), ( 1 << 2 ), ( 1 << 3 ),
+	( 1 << 4 ), ( 1 << 5 ), ( 1 << 6 ), ( 1 << 7 ),
+	( 1 << 8 ), ( 1 << 9 ), ( 1 << 10 ), ( 1 << 11 ),
+	( 1 << 12 ), ( 1 << 13 ), ( 1 << 14 ), ( 1 << 15 ), ( 1 << 16 ),
+};
+
+#define HUFF_EXTEND_TBL(x,s) ((x) < extend_test[s] ? (x) + extend_offset[s] : (x))
+
+#define HUFF_EXTEND(x,s) HUFF_EXTEND_TBL(x,s)
+#define HUFF_EXTEND_P(x,s) HUFF_EXTEND_TBL(x,s)
+
+static U32 MDrv_JPEG_decode_block_dc_first( //JPEG_DECODER *Pd,
+		U8 component_id, U16 block_x, U16 block_y )
+{
+	S32 s, r;
+	BLOCK_TYPE *p = MDrv_JPEG_coeff_buf_getp( _DC_Coeffs[component_id], block_x, block_y );
+
+	if(p == NULL)
+	{
+		//jpeg_print("%s [%d]\n", __FUNCTION__, __LINE__);
+		return 0;
+	}
+	if ( ( s = MDrv_JPEG_huff_decode( &_Huff_tbls[_u8Comp_dc_tab[component_id]] ) ) != 0 )
+	{
+		r = MDrv_JPEG_get_bits_2( s );
+		s = HUFF_EXTEND_P( r, s );
+	}
+
+	// In JPD mode, the DC coefficient is the difference of nearest DC
+	_u32Last_dc_val[component_id] = ( s += _u32Last_dc_val[component_id] );
+
+	p[0] = s << _u8Successive_low;
+	return 1;
+}
+
+//------------------------------------------------------------------------------
+///void decode_block_ac_refine(
+static U32 MDrv_JPEG_decode_block_ac_refine( //JPEG_DECODER *Pd,
+		U8 component_id, U16 block_x, U16 block_y )
+{
+	S32 s, k, r;
+	S32 p1 = 1 << _u8Successive_low;
+	S32 m1 = ( -1 ) << _u8Successive_low;
+	BLOCK_TYPE *p = MDrv_JPEG_coeff_buf_getp( _AC_Coeffs[component_id], block_x, block_y );
+
+	if(p == NULL)
+	{
+		//jpeg_print("%s [%d]\n", __FUNCTION__, __LINE__);
+		return 0;
+	}
+	k = _u8Spectral_start;
+
+	if ( _u32EOB_run == 0 )
+	{
+		for ( ; k <= _u8Spectral_end; k++ )
+		{
+			s = MDrv_JPEG_huff_decode( &_Huff_tbls[_u8Comp_ac_tab[component_id]] );
+
+			r = s >> 4;
+			s &= 15;
+
+			if ( s )
+			{
+				if ( s != 1 )
+				{
+					//MDrv_JPEG_terminate( JPEG_DECODE_ERROR );
+					return 0;
+				}
+
+				if ( MDrv_JPEG_get_bits_2( 1 ) )
+				{
+					s = p1;
+				}
+				else
+				{
+					s = m1;
+				}
+			}
+			else
+			{
+				if ( r != 15 )
+				{
+					_u32EOB_run = 1 << r;
+
+					if ( r )
+					{
+						_u32EOB_run += MDrv_JPEG_get_bits_2( r );
+					}
+
+					break;
+				}
+			}
+
+			do
+			{
+				// No need to do ZAG order in JPD mode
+				BLOCK_TYPE *this_coef = p + k;
+
+				if ( *this_coef != 0 )
+				{
+					if ( MDrv_JPEG_get_bits_2( 1 ) )
+					{
+						if ( ( *this_coef & p1 ) == 0 )
+						{
+							if ( *this_coef >= 0 )
+							{
+								*this_coef += p1;
+							}
+							else
+							{
+								*this_coef += m1;
+							}
+						}
+					}
+				}
+				else
+				{
+					if ( --r < 0 )
+					{
+						break;
+					}
+				}
+
+				k++;
+			}
+			while ( k <= _u8Spectral_end );
+
+			if ( ( s ) && ( k < 64 ) )
+			{
+				// No need to do ZAG order in JPD mode
+				p[k] = s;
+			}
+		}
+	}
+
+	if ( _u32EOB_run > 0 )
+	{
+		for ( ; k <= _u8Spectral_end; k++ )
+		{
+			// No need to do ZAG order in JPD mode
+			BLOCK_TYPE *this_coef = p + k;
+
+			if ( *this_coef != 0 )
+			{
+				if ( MDrv_JPEG_get_bits_2( 1 ) )
+				{
+					if ( ( *this_coef & p1 ) == 0 )
+					{
+						if ( *this_coef >= 0 )
+						{
+							*this_coef += p1;
+						}
+						else
+						{
+							*this_coef += m1;
+						}
+					}
+				}
+			}
+		}
+
+		_u32EOB_run--;
+	}
+	return 1;
+}
+
+static U32 MDrv_JPEG_decode_block_ac_first( //JPEG_DECODER *Pd,
+		U8 component_id, U16 block_x, U16 block_y )
+{
+	BLOCK_TYPE *p;
+	S32 k, s, r;
+
+	if ( _u32EOB_run )
+	{
+		_u32EOB_run--;
+		return 1;
+	}
+
+	p = MDrv_JPEG_coeff_buf_getp( _AC_Coeffs[component_id], block_x, block_y );
+
+	if(p == NULL)
+	{
+		//jpeg_print("%s [%d]\n", __FUNCTION__, __LINE__);
+		return 0;
+	}
+	for ( k = _u8Spectral_start; k <= _u8Spectral_end; k++ )
+	{
+		s = MDrv_JPEG_huff_decode( &_Huff_tbls[_u8Comp_ac_tab[component_id]] );
+
+		r = s >> 4;
+		s &= 15;
+
+		if ( s )
+		{
+			if ( ( k += r ) > 63 )
+			{
+				//MDrv_JPEG_terminate( JPEG_DECODE_ERROR );
+				return 0;
+			}
+
+			r = MDrv_JPEG_get_bits_2( s );
+			s = HUFF_EXTEND_P( r, s );
+
+			// No need to do ZAG order in JPD mode
+			p[k] = s << _u8Successive_low;
+		}
+		else
+		{
+			if ( r == 15 )
+			{
+				if ( ( k += 15 ) > 63 )
+				{
+					//MDrv_JPEG_terminate( JPEG_DECODE_ERROR );
+					return 0;
+				}
+			}
+			else
+			{
+				_u32EOB_run = 1 << r;
+
+				if ( r )
+				{
+					_u32EOB_run += MDrv_JPEG_get_bits_2( r );
+				}
+
+				_u32EOB_run--;
+
+				break;
+			}
+		}
+	}
+	return 1;
+}
+
+static U32 MDrv_JPEG_process_restart( void )
+{
+	U16 i, c = 0;
+
+	// Let's scan a little bit to find the marker, but not _too_ far.
+	// 1536 is a "fudge factor" that determines how much to scan.
+	for ( i = 1536; i > 0; i-- )
+	{
+		if ( MDrv_JPEG_get_char() == 0xFF )
+		{
+			break;
+		}
+	}
+
+	if ( i == 0 )
+	{
+		//MDrv_JPEG_terminate( JPEG_BAD_RESTART_MARKER );
+		return 0;
+	}
+
+	for ( ; i > 0; i-- )
+	{
+		if ( ( c = MDrv_JPEG_get_char() ) != 0xFF )
+		{
+			break;
+		}
+	}
+
+	if ( i == 0 )
+	{
+		//MDrv_JPEG_terminate( JPEG_BAD_RESTART_MARKER );
+		return 0;
+	}
+
+	// Is it the expected marker? If not, something bad happened.
+	if ( c != ( _u16Next_restart_num + M_RST0 ) )
+	{
+		//MDrv_JPEG_terminate( JPEG_BAD_RESTART_MARKER );
+		return 0;
+	}
+
+	// Reset each component's DC prediction values.
+	memset( &_u32Last_dc_val, 0, _u8Comps_in_frame * sizeof( U32 ) );
+
+	_u32EOB_run = 0;
+
+	_u16Restarts_left = _u16Restart_interval;
+
+	_u16Next_restart_num = ( _u16Next_restart_num + 1 ) & 7;
+
+	// Get the bit buffer going again...
+	{
+		_s16Bits_left = 16;
+
+		MDrv_JPEG_get_bits_2( 16 );
+		MDrv_JPEG_get_bits_2( 16 );
+	}
+	return 1;
+}
+
+static U32 MDrv_JPEG_decode_scan( Pdecode_block_func decode_block_func )
+{
+	U16 mcu_row, mcu_col, mcu_block;
+	U32 block_x_mcu[JPEG_MAXCOMPONENTS], block_y_mcu[JPEG_MAXCOMPONENTS];
+
+	memset( block_y_mcu, 0, sizeof( block_y_mcu ) );
+
+	for ( mcu_col = 0; mcu_col < _u16Mcus_per_col; mcu_col++ )
+	{
+		int component_num, component_id;
+
+		memset( block_x_mcu, 0, sizeof( block_x_mcu ) );
+
+		for ( mcu_row = 0; mcu_row < _u16Mcus_per_row; mcu_row++ )
+		{
+			U8 block_x_mcu_ofs = 0, block_y_mcu_ofs = 0;
+
+			if ( ( _u16Restart_interval ) && ( _u16Restarts_left == 0 ) )
+			{
+				if(!MDrv_JPEG_process_restart())
+					return 0;
+			}
+
+			for ( mcu_block = 0; mcu_block < _u8Blocks_per_mcu; mcu_block++ )
+			{
+				component_id = _u8Mcu_org[mcu_block];
+
+				if(!decode_block_func( component_id, block_x_mcu[component_id] + block_x_mcu_ofs, block_y_mcu[component_id] + block_y_mcu_ofs ))
+				{
+					//jpeg_print("%s [%d]\n", __FUNCTION__, __LINE__);
+					return 0;
+				}
+
+				if ( _u8Comps_in_scan == 1 )
+				{
+					block_x_mcu[component_id]++;
+				}
+				else
+				{
+					if ( ++block_x_mcu_ofs == _u8Comp_h_samp[component_id] )
+					{
+						block_x_mcu_ofs = 0;
+
+						if ( ++block_y_mcu_ofs == _u8Comp_v_samp[component_id] )
+						{
+							block_y_mcu_ofs = 0;
+
+							block_x_mcu[component_id] += _u8Comp_h_samp[component_id];
+						}
+					}
+				}
+			}
+
+			_u16Restarts_left--;
+		}
+
+		if ( _u8Comps_in_scan == 1 )
+		{
+			block_y_mcu[_u8Comp_list[0]]++;
+		}
+		else
+		{
+			for ( component_num = 0; component_num < _u8Comps_in_scan; component_num++ )
+			{
+				component_id = _u8Comp_list[component_num];
+
+				block_y_mcu[component_id] += _u8Comp_v_samp[component_id];
+			}
+		}
+	}
+	return 1;
+}
+
+static U32 MDrv_JPEG_init_progressive( void )
+{
+	U8 i;
+
+	if ( _u8Comps_in_frame == 4 )
+	{
+		//MDrv_JPEG_terminate( JPEG_UNSUPPORTED_COLORSPACE );
+		return 0;
+	}
+
+	// Allocate the coefficient buffers.
+	for ( i = 0; i < _u8Comps_in_frame; i++ )
+	{
+		_DC_Coeffs[i] = MDrv_JPEG_coeff_buf_open( ((gu16Max_mcus_per_row+0x1)& ~0x1) * _u8Comp_h_samp[i], ((_u16Max_mcus_per_col+0x1)& ~0x1) * _u8Comp_v_samp[i], 1, 1 );
+		_AC_Coeffs[i] = MDrv_JPEG_coeff_buf_open( ((gu16Max_mcus_per_row+0x1)& ~0x1) * _u8Comp_h_samp[i], ((_u16Max_mcus_per_col+0x1)& ~0x1) * _u8Comp_v_samp[i], 8, 8 );
+		if(_DC_Coeffs[i]== NULL || _AC_Coeffs[i] == NULL)
+		{
+			//jpeg_print("%s [%d]\n", __FUNCTION__, __LINE__);
+			G_MDrv_JPEG_Finalize();
+			return 0;
+		}
+	}
+
+	for ( ; ; )
+	{
+		U32 dc_only_scan, refinement_scan;
+		Pdecode_block_func decode_block_func;
+
+		if ( !MDrv_JPEG_init_scan() )
+		{
+			break;
+		}
+
+		dc_only_scan = ( _u8Spectral_start == 0 );
+		refinement_scan = ( _u8Successive_high != 0 );
+
+		if ( ( _u8Spectral_start > _u8Spectral_end ) || ( _u8Spectral_end > 63 ) )
+		{
+			//MDrv_JPEG_terminate( JPEG_BAD_SOS_SPECTRAL );
+			return 0;
+		}
+
+		if ( dc_only_scan )
+		{
+			if ( _u8Spectral_end )
+			{
+				//MDrv_JPEG_terminate( JPEG_BAD_SOS_SPECTRAL );
+				return 0;
+			}
+		}
+		else if ( _u8Comps_in_scan != 1 )  /* AC scans can only contain one component */
+		{
+			//MDrv_JPEG_terminate( JPEG_BAD_SOS_SPECTRAL );
+			return 0;
+		}
+
+		if ( ( refinement_scan ) && ( _u8Successive_low != _u8Successive_high - 1 ) )
+		{
+			//MDrv_JPEG_terminate( JPEG_BAD_SOS_SUCCESSIVE );
+			return 0;
+		}
+
+		if ( dc_only_scan )
+		{
+			if ( refinement_scan )
+			{
+				decode_block_func = MDrv_JPEG_decode_block_dc_refine;
+			}
+			else
+			{
+				decode_block_func = MDrv_JPEG_decode_block_dc_first;
+			}
+		}
+		else
+		{
+			if ( refinement_scan )
+			{
+				decode_block_func = MDrv_JPEG_decode_block_ac_refine;
+			}
+			else
+			{
+				decode_block_func = MDrv_JPEG_decode_block_ac_first;
+			}
+		}
+
+		if( !MDrv_JPEG_decode_scan( decode_block_func ) )
+			return 0;
+
+	}
+
+	_u8Comps_in_scan = _u8Comps_in_frame;
+
+	for ( i = 0; i < _u8Comps_in_frame; i++ )
+	{
+		_u8Comp_list[i] = i;
+	}
+
+	MDrv_JPEG_calc_mcu_block_order();
+	return 1;
+}
+
+static U32 MDrv_JPEG_init_sequential( void )
+{
+	if ( !MDrv_JPEG_init_scan() )
+	{
+		JPEG_PRINT("MDrv_JPEG_init_scan - JPEG_UNEXPECTED_MARKER\n");
+		//MDrv_JPEG_terminate( JPEG_UNEXPECTED_MARKER );
+		return 0;
+	}
+	return 1;
+}
+
+U32 G_MDrv_JPEG_DecodeHeader(void)
+{
+	if(!MDrv_JPEG_init_frame())
+	{
+		//JPEG_PRINT("%s [%d]\n", __FUNCTION__, __LINE__);
+		return 0;
+	}
+
+	if ( _bProgressive_flag )
+	{
+		if(!MDrv_JPEG_init_progressive())
+			return 0;
+	}
+	else
+	{
+		if(!MDrv_JPEG_init_sequential())
+			return 0;
+	}
+	return 1;
+}
+
+U32 G_MDrv_JPEG_IsProgressive(void)
+{
+	return _bProgressive_flag;
+}
+
+//------------------------------------------------------------------------------
+// JPEG DECODE RESULT
+#define JPEG_FAILED 	-1
+#define JPEG_DONE       1
+#define JPEG_OKAY       0
+
+typedef struct tagSVLD
+{
+	union
+	{
+		struct
+		{
+			U32 amp			:11;
+			U32 sign		:1;
+			U32 run			:4;
+			U32 sym_type	:2;
+			U32 blk_type	:2;
+			U32 EOP			:1;
+			U32 trash		:11;
+		};
+
+		struct
+		{
+			U8 byte0;
+			U8 byte1;
+			U8 byte2;
+			U8 byte3;
+		};
+	};
+} SVLD, *PSVLD;
+
+#define ABS(x)    ((x>=0)?(x):(-x))
+
+typedef enum
+{
+	RLE_DC = 0,
+	RLE_AC,
+	RLE_ZRL,
+	RLE_EOB,
+} EN_RLE_SYMBOL;
+
+#define REG_JPD_BASE               0xBF202E00 // Titania3
+#define JPD_REG(addr)              (*((volatile U32*)(REG_JPD_BASE + ((addr)<<2))))
+
+//******************************************************************************
+//          Structures
+//******************************************************************************
+
+#define AEON_NON_CACHE_MASK  0x80000000  //need to check   sharon
+
+//#define JPD_REG_BASE        0x3000
+
+/******* Internal table SRAM address *******/
+#define JPD_MEM_SCWGIF_BASE     0x0000
+#define JPD_MEM_SYMIDX_BASE     0x0200
+#define JPD_MEM_QTBL_BASE       0x0400
+/**************************************/
+#define JPD_SWRST_S4L   (1<<13)   // Titania
+#define JPD_ROI_EN      (1<<11)
+#define JPD_SVLD        (1<<10)
+#define JPD_SUVQ        (1<<9)
+#define JPD_TBL_RDY     (1<<8)
+#define JPD_DEC_EN      (1<<7)
+#define JPD_RST_EN      (1<<6)
+#define JPD_UV          (1<<3)
+#define JPD_Y_VSF1      (0<<2)
+#define JPD_Y_VSF2      (1<<2)
+#define JPD_Y_HSF1      0x01
+#define JPD_Y_HSF2      0x02
+#define JPD_Y_HSF4      0x03
+
+#define JPD_H_VLD       (1<<1)
+#define JPD_L_VLD       (1<<0)
+
+#define OFFSET(x)       (x*2)
+
+#define REG_JPD_SCONFIG          0x00
+#define REG_JPD_MCONFIG          0x01
+#define REG_JPD_RSTINTV          0x02
+#define REG_JPD_PIC_H            0x03
+#define REG_JPD_PIC_V            0x04
+
+#define REG_JPD_ROI_H            0x05
+#define REG_JPD_ROI_V            0x06
+#define REG_JPD_ROI_WIDTH        0x07
+#define REG_JPD_ROI_HEIGHT       0x08
+
+#define REG_JPD_INTEN            0x09
+#define REG_JPD_EVENTFLAG        0x0A
+#define REG_JPD_RCSMADR_L        0x0B
+#define REG_JPD_RCSMADR_H        0x0C
+#define REG_JPD_RBUF_FLOOR_L     0x0D
+#define REG_JPD_RBUF_FLOOR_H     0x0E
+#define REG_JPD_RBUF_CEIL_L      0x0F
+#define REG_JPD_RBUF_CEIL_H      0x10
+#define REG_JPD_MWBF_SADR_L      0x11
+#define REG_JPD_MWBF_SADR_H      0x12
+// <CK>
+#if 1
+// only T3, T2 does NOT have this
+#define REG_JPD_MWBF_LINE_NUM    0x13
+
+#define REG_JPD_CUR_MADR_L       0x14
+#define REG_JPD_CUR_MADR_H       0x15
+#define REG_JPD_CUR_ROWP         0x16
+#define REG_JPD_CUR_CLNP         0x17
+#define REG_JPD_CUR_VIDX         0x18
+#define REG_JPD_BIST_FAIL        0x19
+#define REG_JPD_DBG_MATCHV       0x1A
+#define REG_JPD_DBG_CTRL         0x1B
+
+// only T3, T2 does NOT have this
+#define REG_JPD_IP_VERSION       0x28
+
+#else
+#define REG_JPD_CUR_MADR_L       0x13
+#define REG_JPD_CUR_MADR_H       0x14
+#define REG_JPD_CUR_ROWP         0x15
+#define REG_JPD_CUR_CLNP         0x16
+#define REG_JPD_CUR_VIDX         0x17
+#define REG_JPD_BIST_FAIL        0x18
+#define REG_JPD_DBG_MATCHV       0x19
+#define REG_JPD_DBG_CTRL         0x1A
+#endif
+// </CK>
+#define REG_JPD_TID_ADR          0x40
+#define REG_JPD_TID_DAT          0x41
+
+// Chip TOP  //need to check    sharon
+#define JPD_CLOCK_S4    (OFFSET(0x0F2D))  // Eris
+#define JPD_CLOCK_S4L   (OFFSET(0x0F4D))    // Titania
+
+static void MHal_JPD_ClearJPDStatus(U16 status_bit)
+{
+	JPD_REG(REG_JPD_EVENTFLAG) = status_bit;
+	JPEG_PRINT("Clear: Bit= %X", status_bit);
+	if( status_bit == 0x10 )
+	{
+		JPD_REG(REG_JPD_MCONFIG) |= 0x01;
+	}
+	else if( status_bit == 0x20 )
+	{
+		JPD_REG(REG_JPD_MCONFIG) |= 0x02;
+	}
+	// clear by write
+	//MDrv_Write2Byte(BK_JPD_EVENTFLAG, status_bit);
+}
+
+// Pluto later
+#define JPD_MWC_WPEN        (1<<12)
+#define JPD_MWC_ACTIVE        (1<<11)
+#define JPD_MRC_ACTIVE        (1<<10)
+#define JPD_MWC_PAUSE        (1<<9)
+#define JPD_MRC_PAUSE        (1<<8)
+
+/************* Downscale Ratio *************/
+/*** Bellows are 1, 1/2, 1/4 and 1/8, in order ***/
+#define JPD_DOWNSCALE_ORG       0x00
+#define JPD_DOWNSCALE_HALF      0x01
+#define JPD_DOWNSCALE_FOURTH    0x02
+#define JPD_DOWNSCALE_EIGHTH    0x03
+/********************I*********************/
+
+/*** Enable interrupt (event report) ***/
+#define JPD_EVENT_DEC_DONE      0x01
+#define JPD_EVENT_ECS_ERROR     0x02
+#define JPD_EVENT_IS_ERROR      0x04
+#define JPD_EVENT_RST_ERROR     0x08
+#define JPD_EVENT_MRBL_DONE     0x10
+#define JPD_EVENT_MRBH_DONE     0x20
+#define JPD_EVENT_ALL           0x3f
+#define JPD_EVENT_ERROR_MASK    0x0E
+/********************************/
+
+static void MHal_JPD_Reset(void)
+{
+	JPD_REG(REG_JPD_SCONFIG) = 0;
+	JPD_REG(REG_JPD_SCONFIG) = JPD_SWRST_S4L;
+	JPD_REG(REG_JPD_INTEN) = JPD_EVENT_ALL;
+}
+
+static unsigned int v2p_offset = 0 ;
+
+static void MHal_JPD_SetReadBuffer(U32 u32BufAddr, U32 u32BufSize)
+{
+	//u32BufAddr = virt_to_phys(u32BufAddr);
+	//JPEG_PRINT("MRB v2p= 0x%X\n", u32BufAddr);
+
+	u32BufAddr -= v2p_offset;
+	JPEG_PRINT("MRB= 0x%X\n", u32BufAddr);
+
+	JPD_REG(REG_JPD_RBUF_FLOOR_L) = (u32BufAddr >> 3) & 0xffff;
+	JPD_REG(REG_JPD_RBUF_FLOOR_H) = (u32BufAddr >> 3) >> 16;
+
+	JPD_REG(REG_JPD_RBUF_CEIL_L) = (((( u32BufAddr + u32BufSize ) >> 3)-1)&0xffff);
+	JPD_REG(REG_JPD_RBUF_CEIL_H) = ((( u32BufAddr + u32BufSize ) >> 3)-1) >> 16;
+
+#if 0
+	u32BufAddr = u32BufAddr & ~AEON_NON_CACHE_MASK;
+
+	// set start address of read buffer
+	MDrv_Write2Byte(BK_JPD_RBUF_FLOOR_L, ( u32BufAddr >> 3 ) & 0xffff);
+	MDrv_Write2Byte(BK_JPD_RBUF_FLOOR_H, ( u32BufAddr >> 3 ) >> 16);
+
+	// set end address of read buffer
+	MDrv_Write2Byte(BK_JPD_RBUF_CEIL_L, (( ( u32BufAddr + u32BufSize ) >> 3 ) & 0xffff) - 1);
+	MDrv_Write2Byte(BK_JPD_RBUF_CEIL_H, ( ( u32BufAddr + u32BufSize ) >> 3 ) >> 16);
+#endif
+
+	//printf("BK_JPD_RBUF_FLOOR_L = %08x\n",( u32BufAddr >> 3 ) & 0xffff);
+	//printf("BK_JPD_RBUF_FLOOR_H = %08x\n",( u32BufAddr >> 3 ) >> 16);
+	//printf("BK_JPD_RBUF_CEIL_L = %08x\n",(( ( u32BufAddr + u32BufSize ) >> 3 ) & 0xffff) - 1);
+	//printf("BK_JPD_RBUF_CEIL_H = %08x\n",( ( u32BufAddr + u32BufSize ) >> 3 ) >> 16);
+}
+
+static void MHal_JPD_SetMRCStartAddr(U32 u32ByteOffset)
+{
+	//u32ByteOffset = virt_to_phys(u32ByteOffset);
+	//JPEG_PRINT("MRCStart v2p= 0x%X\n", u32ByteOffset);
+
+	u32ByteOffset -= v2p_offset;
+	JPEG_PRINT("MRCStart= 0x%X\n", u32ByteOffset);
+
+	JPD_REG(REG_JPD_RCSMADR_L) = (u32ByteOffset & 0xffff);
+	JPD_REG(REG_JPD_RCSMADR_H) = (u32ByteOffset >> 16);
+
+#if 0
+	u32ByteOffset = u32ByteOffset & ~AEON_NON_CACHE_MASK;
+
+	MDrv_Write2Byte(BK_JPD_RCSMADR_L, (u32ByteOffset & 0xffff));
+	MDrv_Write2Byte(BK_JPD_RCSMADR_H, (u32ByteOffset >> 16));
+#endif
+}
+
+
+static void MHal_JPD_SetOutputFrameBuffer(U32 u32BufAddr)
+{
+	//u32BufAddr = virt_to_phys(u32BufAddr);
+	//JPEG_PRINT("MWB v2p= 0x%X\n", u32BufAddr);
+
+	u32BufAddr -= v2p_offset;
+	JPEG_PRINT("MWB= 0x%X\n", u32BufAddr);
+
+	JPD_REG(REG_JPD_MWBF_SADR_L) = (u32BufAddr >> 3) & 0xffff;
+	JPD_REG(REG_JPD_MWBF_SADR_H) = (u32BufAddr >> 3) >> 16;
+
+#if 0
+	u32BufAddr = u32BufAddr & ~AEON_NON_CACHE_MASK;
+
+	MDrv_Write2Byte(BK_JPD_MWBF_SADR_L, ( u32BufAddr >> 3 ) & 0xffff);
+	MDrv_Write2Byte(BK_JPD_MWBF_SADR_H, ( u32BufAddr >> 3 ) >> 16);
+#endif
+}
+
+static void MHal_JPD_SetPicDimension(U16 u16Width, U16 u16Height)
+{
+	JPD_REG(REG_JPD_PIC_H) = (u16Width >> 3);
+	JPD_REG(REG_JPD_PIC_V) = (u16Height >> 3);
+
+#if 0
+	MDrv_Write2Byte( BK_JPD_PIC_H, ( u16Width >> 3 ) );
+	MDrv_Write2Byte( BK_JPD_PIC_V, ( u16Height >> 3 ) );
+#endif
+}
+
+static int MAX_JPEG_WIDTH_HD = 2048;
+static int MAX_JPEG_HEIGHT_HD = 1536;
+
+static int MAX_JPEG_PROGRESSIVE_WIDTH  = 1024;
+static int MAX_JPEG_PROGRESSIVE_HEIGHT = 768;
+
+static int MAX_JPEG_BASELINE_WIDTH  = 2048;
+static int MAX_JPEG_BASELINE_HEIGHT = 1536;
+
+typedef enum
+{
+	RATIO_ORIGINAL = 0,
+	RATIO_HALF = 1,
+	RATIO_FOURTH = 2,
+	RATIO_EIGHTH = 3
+} EN_JPEG_DOWNSCALE_RATIO;
+
+static void MDrv_JPEG_write_Scwgif(void) //type : luma=>0  chroma=>1
+{
+	U32 reg_value;
+	U16 i, ci, valid, tbl_num_luma, tbl_num_chroma;
+	U8 luma_ci = 0, chroma_ci = 0;
+
+
+	for(ci = 0; ci<_u8Comps_in_frame; ci++)
+	{
+		if(_u8LumaCi==_u8Comp_ident[ci])
+		{
+			luma_ci = ci;
+			break;
+		}
+	}
+
+	for(ci = 0; ci<_u8Comps_in_frame; ci++)
+	{
+		if(_u8ChromaCi==_u8Comp_ident[ci])
+		{
+			chroma_ci = ci;
+			break;
+		}
+	}
+
+	tbl_num_luma = _u8Comp_dc_tab[luma_ci];
+	tbl_num_chroma = _u8Comp_dc_tab[chroma_ci];
+
+	JPD_REG(REG_JPD_TID_ADR) = JPD_MEM_SCWGIF_BASE;
+
+	for ( i = 1; i <= 16; i++ )
+	{
+		if(_Huff_info[tbl_num_luma].u8Symbol[i] == 0xFF)
+			valid = 0;
+		else
+			valid = 1;
+
+		if ( valid )
+		{
+			reg_value = ( valid << 24 ) | ( _Huff_info[tbl_num_luma].u16Code[i] << 8 ) | ( _Huff_info[tbl_num_luma].u8Symbol[i] << 4 );
+		}
+		else
+		{
+			reg_value = 0;
+		}
+
+		JPD_REG(REG_JPD_TID_DAT) = reg_value & 0xffff;
+		JPD_REG(REG_JPD_TID_DAT) = reg_value >> 16;
+		//MDrv_Write2Byte(REG_JPD_TID_DAT, reg_value & 0xffff);
+		//MDrv_Write2Byte(REG_JPD_TID_DAT, reg_value >> 16);
+	}
+
+	for ( i = 1; i <= 16; i++ )
+	{
+		if(_Huff_info[tbl_num_chroma].u8Symbol[i] == 0xFF)
+			valid = 0;
+		else
+			valid = 1;
+
+		if ( valid )
+		{
+			reg_value = ( valid << 24 ) | ( _Huff_info[tbl_num_chroma].u16Code[i] << 8 ) | ( _Huff_info[tbl_num_chroma].u8Symbol[i] << 4 );
+		}
+		else
+		{
+			reg_value = 0;
+		}
+
+		JPD_REG(REG_JPD_TID_DAT) = reg_value & 0xffff;
+		JPD_REG(REG_JPD_TID_DAT) = reg_value >> 16;
+		//MDrv_Write2Byte(REG_JPD_TID_DAT, reg_value & 0xffff);
+		//MDrv_Write2Byte(REG_JPD_TID_DAT, reg_value >> 16);
+	}
+
+	tbl_num_luma = _u8Comp_ac_tab[luma_ci];
+	tbl_num_chroma = _u8Comp_ac_tab[chroma_ci];
+
+	for ( i = 1; i <= 16; i++ )
+	{
+		if(_Huff_info[tbl_num_luma].u8Symbol[i] == 0xFF)
+			valid = 0;
+		else
+			valid = 1;
+
+		if ( valid )
+		{
+			reg_value = ( valid << 24 ) | ( _Huff_info[tbl_num_luma].u16Code[i] << 8 ) | ( _Huff_info[tbl_num_luma].u8Symbol[i] );
+		}
+		else
+		{
+			reg_value = 0;
+		}
+
+		JPD_REG(REG_JPD_TID_DAT) = reg_value & 0xffff;
+		JPD_REG(REG_JPD_TID_DAT) = reg_value >> 16;
+		//MDrv_Write2Byte(REG_JPD_TID_DAT, reg_value & 0xffff);
+		//MDrv_Write2Byte(REG_JPD_TID_DAT, reg_value >> 16);
+	}
+
+	for ( i = 1; i <= 16; i++ )
+	{
+		if(_Huff_info[tbl_num_chroma].u8Symbol[i] == 0xFF)
+			valid = 0;
+		else
+			valid = 1;
+
+		if ( valid )
+		{
+			reg_value = ( valid << 24 ) | ( _Huff_info[tbl_num_chroma].u16Code[i] << 8 ) | ( _Huff_info[tbl_num_chroma].u8Symbol[i] );
+		}
+		else
+		{
+			reg_value = 0;
+		}
+
+		JPD_REG(REG_JPD_TID_DAT) = reg_value & 0xffff;
+		JPD_REG(REG_JPD_TID_DAT) = reg_value >> 16;
+		//MDrv_Write2Byte(REG_JPD_TID_DAT, reg_value & 0xffff);
+		//MDrv_Write2Byte(REG_JPD_TID_DAT, reg_value >> 16);
+	}
+}
+
+static void MDrv_JPEG_write_symidx(void)
+{
+	U16 i, tbl_num_luma, tbl_num_chroma;
+	U8 ci, luma_ci = 0, chroma_ci = 0;
+	U16 regval;
+
+	for(ci = 0; ci<_u8Comps_in_frame; ci++)
+	{
+		if(_u8LumaCi==_u8Comp_ident[ci])
+		{
+			luma_ci = ci;
+			break;
+		}
+	}
+
+	for(ci = 0; ci<_u8Comps_in_frame; ci++)
+	{
+		if(_u8ChromaCi==_u8Comp_ident[ci])
+		{
+			chroma_ci = ci;
+			break;
+		}
+	}
+
+	tbl_num_luma = _u8Comp_ac_tab[luma_ci];
+	tbl_num_chroma = _u8Comp_ac_tab[chroma_ci];
+
+	JPD_REG(REG_JPD_TID_ADR) = JPD_MEM_SYMIDX_BASE;
+	//MDrv_Write2Byte(REG_JPD_TID_ADR, JPD_MEM_SYMIDX_BASE);
+	for ( i = 0; i < 256; i++ )
+	{
+		//jpeg_print("_Huff_info[%d].u8Huff_val[%d]= %X\n", tbl_num_chroma, i, _Huff_info[tbl_num_chroma].u8Huff_val[i]);
+		//jpeg_print("_Huff_info[%d].u8Huff_val[%d]= %X\n", tbl_num_luma, i, _Huff_info[tbl_num_luma].u8Huff_val[i]);
+		//jpeg_print("regval= %X\n", ((U16)( _Huff_info[tbl_num_chroma].u8Huff_val[i] << 8 ) | ( _Huff_info[tbl_num_luma].u8Huff_val[i] )));
+
+		regval = ((U16)( _Huff_info[tbl_num_chroma].u8Huff_val[i] << 8 ) | ( _Huff_info[tbl_num_luma].u8Huff_val[i] ));
+		//jpeg_print("regval= %X\n", regval);
+
+		JPD_REG(REG_JPD_TID_DAT) = regval;
+		//JPD_REG(REG_JPD_TID_DAT) = ((U16)( _Huff_info[tbl_num_chroma].u8Huff_val[i] << 8 ) | ( _Huff_info[tbl_num_luma].u8Huff_val[i] ));
+		//MDrv_Write2Byte( REG_JPD_TID_DAT, ( _Huff_info[tbl_num_chroma].u8Huff_val[i] << 8 ) | ( _Huff_info[tbl_num_luma].u8Huff_val[i] ) );
+	}
+
+	tbl_num_luma = _u8Comp_dc_tab[luma_ci];
+	tbl_num_chroma = _u8Comp_dc_tab[chroma_ci];
+
+	for ( i = 0; i < 16; i++ )
+	{
+		//jpeg_print("_Huff_info[%d].u8Huff_val[%d]= %X\n", tbl_num_chroma, i, _Huff_info[tbl_num_chroma].u8Huff_val[i]);
+		//jpeg_print("_Huff_info[%d].u8Huff_val[%d]= %X\n", tbl_num_luma, i, _Huff_info[tbl_num_luma].u8Huff_val[i]);
+		//jpeg_print("regvalu= %X\n", ((U16)( _Huff_info[tbl_num_chroma].u8Huff_val[i] << 8 ) | ( _Huff_info[tbl_num_luma].u8Huff_val[i] )));
+
+		regval = ((U16)( _Huff_info[tbl_num_chroma].u8Huff_val[i] << 8 ) | ( _Huff_info[tbl_num_luma].u8Huff_val[i] ));
+		//jpeg_print("regval= %X\n", regval);
+
+		JPD_REG(REG_JPD_TID_DAT) = regval;
+		//MDrv_Write2Byte( REG_JPD_TID_DAT, ( _Huff_info[tbl_num_chroma].u8Huff_val[i] << 8 ) | ( _Huff_info[tbl_num_luma].u8Huff_val[i] ) );
+	}
+}
+
+// This table is only used in JPD
+static const U8 _u8Jpeg_zigzag_order[64] =
+{
+	0, 1, 5, 6, 14, 15, 27, 28,
+	2, 4, 7, 13, 16, 26, 29, 42,
+	3, 8, 12, 17, 25, 30, 41, 43,
+	9, 11, 18, 24, 31, 40, 44, 53,
+	10, 19, 23, 32, 39, 45, 52, 54,
+	20, 22, 33, 38, 46, 51, 55, 60,
+	21, 34, 37, 47, 50, 56, 59, 61,
+	35, 36, 48, 49, 57, 58, 62, 63
+};
+
+static void MDrv_JPEG_write_Qtbl(void)
+{
+	U8 i, j;
+	U8 com_num = 0;
+	U8 comp[JPEG_MAXCOMPONENTS];
+
+	// Calculate how many valid quantization tables
+	memset(comp, 0, JPEG_MAXCOMPONENTS);
+	for(i = 0; i<_u8Comps_in_frame; i++)
+	{
+		comp[_u8Comp_quant[i]] = 1;
+	}
+
+	for(i = 0; i<JPEG_MAXCOMPONENTS; i++)
+	{
+		if(comp[i]==1)
+			com_num++;
+	}
+
+	JPD_REG(REG_JPD_TID_ADR) = JPD_MEM_QTBL_BASE;
+	//MDrv_Write2Byte(REG_JPD_TID_ADR, JPD_MEM_QTBL_BASE);
+	for ( i = 0; i < com_num; i++ )
+	{
+		for(j = 0; j<64; j++)
+		{
+			JPD_REG(REG_JPD_TID_DAT) = _QuantTables[_u8Comp_quant[i]].s16Value[_u8Jpeg_zigzag_order[j]];
+			//MDrv_Write2Byte(REG_JPD_TID_DAT, _QuantTables[_u8Comp_quant[i]].s16Value[_u8Jpeg_zigzag_order[j]]);
+			//jpeg_print("_QuantTables[%d].s16Value[%d]= %X\n", _u8Comp_quant[i], _u8Jpeg_zigzag_order[j], _QuantTables[_u8Comp_quant[i]].s16Value[_u8Jpeg_zigzag_order[j]]);
+		}
+	}
+	// if all compoents refer to the same Qtable, need to write Qtable twice
+	if(com_num==1)
+	{
+		for ( i = 0; i < com_num; i++ )
+		{
+			for(j = 0; j<64; j++)
+			{
+				JPD_REG(REG_JPD_TID_DAT) = _QuantTables[_u8Comp_quant[i]].s16Value[_u8Jpeg_zigzag_order[j]];
+				//MDrv_Write2Byte(BK_JPD_TID_DAT, _QuantTables[_u8Comp_quant[i]].s16Value[_u8Jpeg_zigzag_order[j]]);
+			}
+		}
+	}
+	//    JPD_REG(REG_JPD_TID_ADR) = JPD_MEM_QTBL_BASE;
+	//    for( j=0; j<64; j++ )
+	//    {
+	//        jpeg_print("QT[%d]= %X\n", j, JPD_REG(REG_JPD_TID_DAT));
+	//    }
+
+}
+
+static void MHal_JPD_SetROI(U16 start_x, U16 start_y, U16 width, U16 height)
+{
+	JPD_REG(REG_JPD_ROI_H) = start_x;
+	JPD_REG(REG_JPD_ROI_V) = start_y;
+	JPD_REG(REG_JPD_ROI_WIDTH) = width;
+	JPD_REG(REG_JPD_ROI_HEIGHT) = height;
+
+#if 0
+	U16 reg_val;
+
+	reg_val = MDrv_Read2Byte(BK_JPD_SCONFIG);
+
+	MDrv_Write2Byte(BK_JPD_ROI_H, start_x);
+	MDrv_Write2Byte(BK_JPD_ROI_V, start_y);
+	MDrv_Write2Byte(BK_JPD_ROI_WIDTH, width );
+	MDrv_Write2Byte(BK_JPD_ROI_HEIGHT, height );
+	//MDrv_Write2Byte(BK_JPD_SCONFIG, reg_val | JPD_ROI_EN);
+#endif
+}
+
+static void G_MDrv_JPEG_StartDecode(void)
+{
+	U8 mcu_width, mcu_height;
+	U16 pic_width = _u16Image_x_size;
+	U16 pic_height = _u16Image_y_size;
+	U8 Y_VSF = _u8Comp_v_samp[0];
+	U8 Y_HSF = _u8Comp_h_samp[0];
+	U32 bUV_en;
+	U32 reg_value;
+	U8 i,RatioVal, Factor = 1;
+	U8 com_num = 0;
+	U8 comp[JPEG_MAXCOMPONENTS];
+
+	JPEG_PRINT("Start JPD decode\n");
+
+	//    if ( setjmp( _jmp_state ) )
+	//    {
+	//        return;
+	//    }
+
+	// reset JPD hardware
+	MHal_JPD_Reset();
+
+	// Calculate how many valid quantization tables for components
+	memset(comp, 0, JPEG_MAXCOMPONENTS);
+	for(i = 0; i<_u8Comps_in_frame; i++)
+	{
+		comp[_u8Comp_quant[i]] = 1;
+	}
+
+	for(i = 0; i<JPEG_MAXCOMPONENTS; i++)
+	{
+		if(comp[i]==1)
+			com_num++;
+	}
+
+	if(_u8Comps_in_frame>1)
+		bUV_en = 1;
+	else
+		bUV_en = 0;
+
+	if ( ( mcu_width = pic_width % ( Y_HSF * 8 ) ) )
+	{
+		pic_width += ( Y_HSF * 8 - mcu_width );
+	}
+
+	if ( ( mcu_height = pic_height% ( Y_VSF * 8 ) ) )
+	{
+		pic_height += ( Y_VSF * 8 - mcu_height );
+	}
+
+	if(_bThumbnailAccessMode)
+	{
+		// Set MRC buffer for JPD
+		MHal_JPD_SetReadBuffer(INTERNAL_BUFFER_ADDR, JPEG_DEFAULT_EXIF_SIZE);
+		// Set MRC start access byte address
+		MHal_JPD_SetMRCStartAddr(INTERNAL_BUFFER_ADDR + _u32ThumbnailOffset + G_MDrv_JPEG_GetECS());
+	}
+	else
+	{
+		if(_bProgressive_flag)
+		{
+			// Set MRC buffer for JPD
+			MHal_JPD_SetReadBuffer(MRC_BUFFER_ADDR, MRC_BUFFER_SIZE);
+			// Set MRC start access byte address
+			MHal_JPD_SetMRCStartAddr(MRC_BUFFER_ADDR);
+		}
+		else
+		{
+			// Set MRC buffer for JPD
+			MHal_JPD_SetReadBuffer(MRC_BUFFER_ADDR, MRC_BUFFER_SIZE);
+			// Set MRC start access byte address
+			//MHal_JPD_SetMRCStartAddr(MRC_BUFFER_ADDR + MDrv_JPEG_GetECS());
+			JPEG_PRINT("_pu8In_buf_ofs=0x%X\n", (U32)_pu8In_buf_ofs);
+			MHal_JPD_SetMRCStartAddr( (U32)_pu8In_buf_ofs );
+		}
+	}
+
+	// Set MWC buffer for JPD
+	MHal_JPD_SetOutputFrameBuffer(MWC_BUFFER_ADDR);
+	// Set picture width and height
+	MHal_JPD_SetPicDimension(pic_width, pic_height);
+
+	_u16Image_x_size = pic_width;
+	_u16Image_y_size = pic_height;
+
+	if(_bProgressive_flag)
+	{
+		MAX_JPEG_WIDTH_HD = MAX_JPEG_PROGRESSIVE_WIDTH;
+		MAX_JPEG_HEIGHT_HD = MAX_JPEG_PROGRESSIVE_HEIGHT;
+	}
+	else
+	{
+		MAX_JPEG_WIDTH_HD = MAX_JPEG_BASELINE_WIDTH;
+		MAX_JPEG_HEIGHT_HD = MAX_JPEG_BASELINE_HEIGHT;
+	}
+
+	JPEG_PRINT("Width = %d and Height = %d\n",pic_width,pic_height);
+	JPEG_PRINT("Max Width = %d and Max Height = %d\n", MAX_JPEG_WIDTH_HD,MAX_JPEG_HEIGHT_HD);
+
+	//Set the Scale down variable
+	if(pic_width > MAX_JPEG_WIDTH_HD*4 || pic_height>MAX_JPEG_HEIGHT_HD*4)
+	{
+		RatioVal = RATIO_EIGHTH;
+		_u8DownScaleRatio = JPD_DOWNSCALE_EIGHTH;
+		Factor = 8;
+		_u16Image_y_size = pic_height/Factor;
+		JPEG_PRINT("down scale 1/8!!\n");
+	}
+	else if(pic_width > MAX_JPEG_WIDTH_HD*2 || pic_height>MAX_JPEG_HEIGHT_HD*2)
+	{
+		RatioVal = RATIO_FOURTH;
+		_u8DownScaleRatio = JPD_DOWNSCALE_FOURTH;
+		Factor = 4;
+		_u16Image_y_size = pic_height/Factor;
+		JPEG_PRINT("down scale 1/4!!\n");
+	}
+	else if (pic_width > MAX_JPEG_WIDTH_HD || pic_height>MAX_JPEG_HEIGHT_HD)
+	{
+		RatioVal = RATIO_HALF;
+		_u8DownScaleRatio = JPD_DOWNSCALE_HALF;
+		Factor = 2;
+		_u16Image_x_size = pic_width/Factor;
+		_u16Image_y_size = pic_height/Factor;
+		JPEG_PRINT("down scale 1/2!!\n");
+	}
+	else
+	{
+		JPEG_PRINT("down scale 1/1!!\n");
+		RatioVal = RATIO_ORIGINAL;
+		_u8DownScaleRatio = JPD_DOWNSCALE_ORG;
+		Factor = 1;
+	}
+
+	// In JPD, software VLD mode, we don't need to write huff & symbol tables
+	if(_bProgressive_flag==0)
+	{
+		MDrv_JPEG_write_Scwgif();
+		MDrv_JPEG_write_symidx();
+	}
+
+	MDrv_JPEG_write_Qtbl();
+
+	//MDrv_JPEG_DumpTables();
+
+	Y_VSF -= 1;
+	if ( Y_HSF == 4 )
+	{
+		Y_HSF = 3;
+	}
+
+	if(_u16Restart_interval)
+	{
+		JPD_REG(REG_JPD_RSTINTV) =  _u16Restart_interval - 1;
+		//MDrv_Write2Byte(REG_JPD_RSTINTV, _u16Restart_interval - 1);
+		reg_value = ( JPD_TBL_RDY | JPD_RST_EN | ((U32) _u8DownScaleRatio) << 4 | ((U32) bUV_en) << 3 | ( Y_VSF << 2 ) | Y_HSF );
+	}
+	else
+	{
+		reg_value = ( JPD_TBL_RDY | ((U32) _u8DownScaleRatio) << 4 | ((U32) bUV_en) << 3 | ( Y_VSF << 2 ) | Y_HSF );
+	}
+
+	// There're Q tables for U & V, respectively.
+	if(com_num>2)
+	{
+		reg_value = reg_value | JPD_SUVQ;
+	}
+	/*if(_bProgressive_flag==FALSE)
+	  {
+	// pre-load buffer
+	if ( MDrv_JPEG_GetECS()>= ( MRC_BUFFER_SIZE / 2 ) )
+	{
+	MDrv_JPEG_PreLoadBuffer(JPEG_BUFFER_LOW);
+	}
+	jpeg_print("Come in Pre-Load Buffer!!\n");
+	}*/
+
+	if(_bProgressive_flag)
+		reg_value = reg_value | JPD_SVLD;
+
+	// Check if it needs to do ROI
+	if(_u8DownScaleRatio==JPD_DOWNSCALE_HALF||_u8DownScaleRatio==JPD_DOWNSCALE_FOURTH||_u8DownScaleRatio==JPD_DOWNSCALE_EIGHTH)
+	{
+		U16 ROI_width;
+
+		if(_u8DownScaleRatio==JPD_DOWNSCALE_HALF)
+		{
+			// width must be multiple of 32
+
+			ROI_width = (pic_width/16)*16;
+
+
+			if(ROI_width!=pic_width)
+			{
+				//jpeg_print("ROI!!\n");
+				MHal_JPD_SetROI(0, 0, (ROI_width>>3), (pic_height>>3));
+
+				reg_value = reg_value | JPD_ROI_EN;
+			}
+
+			_u16Image_x_size = ROI_width/Factor;
+		}
+		else if(_u8DownScaleRatio==JPD_DOWNSCALE_FOURTH)
+		{
+			// width must be multiple of 32
+
+			ROI_width = (pic_width/32)*32;
+
+
+			if(ROI_width!=pic_width)
+			{
+				//jpeg_print("ROI!!\n");
+				MHal_JPD_SetROI(0, 0, (ROI_width>>3), (pic_height>>3));
+
+				reg_value = reg_value | JPD_ROI_EN;
+			}
+
+			_u16Image_x_size = ROI_width/Factor;
+		}
+		else if(_u8DownScaleRatio==JPD_DOWNSCALE_EIGHTH)
+		{
+			// width must be multiple of 64
+			ROI_width = (pic_width/64)*64;
+			// jpeg_print("down scale 1/8!!\n");
+			if(ROI_width!=pic_width)
+			{
+				//jpeg_print("ROI!!\n");
+				MHal_JPD_SetROI(0, 0, ROI_width>>3, pic_height>>3);
+
+				reg_value = reg_value | JPD_ROI_EN;
+			}
+			_u16Image_x_size = ROI_width/Factor;
+		}
+	}
+
+	if( ((U32)_pu8In_buf_ofs)  > (MRC_BUFFER_ADDR +MRC_BUFFER_SIZE/2) && _u8FileReadEnd_flag==0 )
+	{
+		volatile  U8* tmp;
+		tmp = (volatile  U8*)(MRC_BUFFER_ADDR);
+		tmp[0]=0x55;
+		tmp[1]=0xAA;
+		tmp[2]=0xAA;
+		tmp[3]=0x54;
+		//MDrv_JPEG_Wait();
+	}
+
+	// <CK>
+	// mark low/high buffer valid
+#if 1
+	JPD_REG(REG_JPD_MCONFIG) = JPD_H_VLD |JPD_L_VLD | (1<<5); // add UV Swap
+#else
+	JPD_REG(REG_JPD_MCONFIG) = JPD_H_VLD |JPD_L_VLD; // no UV Swap
+#endif
+	//MDrv_Write2Byte( REG_JPD_MCONFIG, JPD_H_VLD |JPD_L_VLD);
+
+	// enable JPD decoding
+	JPD_REG(REG_JPD_SCONFIG) = reg_value | JPD_DEC_EN | JPD_SWRST_S4L;
+	//MDrv_Write2Byte( REG_JPD_SCONFIG, reg_value | JPD_DEC_EN | JPD_SWRST_S4L);
+
+	//JPEG_DEBUG("After SCONFIG START\n");
+}
+
+static U16 MHal_JPD_ReadJPDStatus(void)
+{
+	return JPD_REG(REG_JPD_EVENTFLAG);
+
+	//return MDrv_Read2Byte((U16)BK_JPD_EVENTFLAG);
+}
+
+static U32 G_MDrv_JPEG_write_RLE(PSVLD pVld, U32 bDecodeNow)
+{
+	U8 *mrc_buffer = (U8 *) MRC_BUFFER_ADDR;
+	U16 status;
+	//U32 start_time;
+	U16 cur_vIdx;
+	U32 reg_value;
+	U16 u16Count = 2000;
+
+	memcpy(mrc_buffer + _u32RLEOffset, pVld, 4);
+	_u32RLEOffset += 4;
+
+	// Check if buffer full
+	if(_u32RLEOffset==MRC_BUFFER_SIZE || bDecodeNow==1)
+	{
+		//JPEG_DEBUG("Do RLE, LENG %d\n", _u32RLEOffset);
+
+		if(_bFirstRLE==1)
+		{
+			// clear MRC low/high portion read complete event
+			MHal_JPD_ClearJPDStatus(JPD_EVENT_MRBH_DONE | JPD_EVENT_MRBL_DONE);
+			// mark low/high buffer valid
+			reg_value = (JPD_REG(REG_JPD_MCONFIG) & ~0x0003) | (JPD_H_VLD |JPD_L_VLD);
+			JPD_REG(REG_JPD_MCONFIG) = reg_value;
+			//MDrv_Write2Byte( REG_JPD_MCONFIG, (MDrv_Read2Byte(REG_JPD_MCONFIG) & ~0x0003) | (JPD_H_VLD |JPD_L_VLD));
+		}
+
+		// Trigger JPD decoding
+		if(_bFirstRLE==0)
+		{
+			G_MDrv_JPEG_StartDecode();
+			_bFirstRLE = 1;
+		}
+
+		//sharon start_time = MsOS_GetSystemTime();
+		cur_vIdx = JPD_REG(REG_JPD_CUR_VIDX);
+
+		JPEG_PRINT("cur_vIdx = %x\n",cur_vIdx);
+
+		if( bDecodeNow )
+		{
+			return 1;  //wait done in main loop
+		}
+
+		while( u16Count > 0 )
+		{
+			status = MHal_JPD_ReadJPDStatus();
+
+			if(status & JPD_EVENT_DEC_DONE)
+			{
+				JPEG_PRINT("P deocde done\n");
+				break;
+			}
+
+			if((status & JPD_EVENT_ECS_ERROR) || (status & JPD_EVENT_IS_ERROR) || (status & JPD_EVENT_RST_ERROR))
+			{
+				// temp patch for protect JPD from writing to illegal memory
+				//MHal_JPD_SW_Pause_Reset();
+				//MDrv_JPEG_terminate( JPEG_SVLD_DECODE_ERROR );
+				return 0;
+			}
+
+			if((status & JPD_EVENT_MRBH_DONE) && (status & JPD_EVENT_MRBL_DONE))
+			{
+				JPEG_PRINT("Partial SVLD decode done\n");
+				break;
+			}
+
+			// Check the V index. If it is not changed withing 500ms, it means that the JPD has some problem.
+			// We need to break the infinite loop
+			if(cur_vIdx != JPD_REG(REG_JPD_CUR_VIDX))
+			{
+				//sharon  start_time = MsOS_GetSystemTime();
+				cur_vIdx = JPD_REG(REG_JPD_CUR_VIDX);
+			}
+			else
+			{
+				if(0)  //sharon ((MsOS_GetSystemTime() - start_time)>=DEFAULT_DECODE_TIMEOUT)
+				{
+					JPEG_PRINT("ERROR: SVLD deocde time out, VIdx %d\n", cur_vIdx);
+					break;
+				}
+			}
+			mstar_msleep(1);
+			if((u16Count--) == 0)
+			{
+				JPEG_PRINT("MDrv_JPEG_write_RLE Timeout\n");
+				return 1;
+			}
+		}
+
+		_u32RLEOffset = 0;
+	}
+	return 1;
+}
+
+static void G_MDrv_JPEG_do_RLE(BLOCK_TYPE *p, BOOL eop, U8 comp_id)
+{
+	SVLD my_vld;
+	U8 counter;
+	S16 value;
+	U16 run;
+	U8 cur_blk;
+	BLOCK_TYPE predictor;
+
+	if(comp_id==0)
+		cur_blk = 1;     // Y
+	else if(comp_id==1)
+		cur_blk = 3;    // U
+	else
+		cur_blk = 2;    // V
+
+	predictor = _s16dc_pred[cur_blk - 1];
+
+	run = 0;
+	my_vld.byte0 = my_vld.byte1 = my_vld.byte2 = my_vld.byte3 = 0;
+	my_vld.blk_type = cur_blk;
+
+	//sent DC info
+	my_vld.run = 8;
+	value = (p[0] - predictor);
+	my_vld.sign = (value<0)?1:0;
+	my_vld.amp = ABS(value);
+	my_vld.sym_type = RLE_DC;
+	G_MDrv_JPEG_write_RLE(&my_vld, 0);
+
+	my_vld.byte0 = my_vld.byte1 =my_vld.byte2 = my_vld.byte3= 0;
+	my_vld.blk_type = cur_blk;
+
+	for(counter = 1;counter<64; counter++)
+	{
+		if(p[counter]==0)
+		{
+			run++;
+		}
+		else
+		{
+			while(run>15)
+			{
+				my_vld.sign = 0;
+				my_vld.amp = 0;
+				my_vld.sym_type = RLE_ZRL;
+				my_vld.run = 15;
+				G_MDrv_JPEG_write_RLE(&my_vld, 0);
+
+				my_vld.byte0 = my_vld.byte1 = my_vld.byte2 = my_vld.byte3 = 0;
+				my_vld.blk_type = cur_blk;
+				run -= 16;
+			}
+
+			my_vld.sign = (p[counter]<0)?1:0;
+			my_vld.amp = ABS(p[counter]);
+			my_vld.sym_type = RLE_AC;
+			my_vld.run = run;
+
+			// Check if the last byte is non-zero. If it's non-zero & EOP, add the EOP flag
+			if(counter==63&&eop&&p[63]!=0)
+			{
+				my_vld.EOP = 1;
+				G_MDrv_JPEG_write_RLE(&my_vld, 1);
+
+				_s16dc_pred[cur_blk - 1] = p[0];//update predictor
+				return;
+			}
+			else
+				G_MDrv_JPEG_write_RLE(&my_vld, 0);
+
+			my_vld.byte0 = my_vld.byte1 = my_vld.byte2 = my_vld.byte3 = 0;
+			my_vld.blk_type = cur_blk;
+			run = 0;
+		}
+	}
+
+	counter = 63;
+
+	if(p[counter]==0)
+	{
+		my_vld.amp = ABS(p[counter]);
+		my_vld.sign = p[counter]<0?1:0;
+		my_vld.sym_type = RLE_EOB;
+		my_vld.run = 0;
+		if(eop)
+		{
+			my_vld.EOP =1;
+			G_MDrv_JPEG_write_RLE(&my_vld, 1);
+		}
+		else
+			G_MDrv_JPEG_write_RLE(&my_vld, 0);
+	}
+
+	_s16dc_pred[cur_blk - 1] = p[0];//update predictor
+}
+
+static void G_MDrv_JPEG_load_next_row( void )
+{
+	BLOCK_TYPE p[64];
+
+	U16 mcu_row, mcu_block;
+	U8 component_num, component_id;
+	U16 block_x_mcu[JPEG_MAXCOMPONENTS];
+
+	memset( block_x_mcu, 0, JPEG_MAXCOMPONENTS * sizeof( U16 ) );
+
+	for ( mcu_row = 0; mcu_row < _u16Mcus_per_row; mcu_row++ )
+	{
+		U16 block_x_mcu_ofs = 0, block_y_mcu_ofs = 0;
+
+		for ( mcu_block = 0; mcu_block < _u8Blocks_per_mcu; mcu_block++ )
+		{
+			BLOCK_TYPE *pAC;
+			BLOCK_TYPE *pDC;
+
+			component_id = _u8Mcu_org[mcu_block];
+
+			pAC = MDrv_JPEG_coeff_buf_getp( _AC_Coeffs[component_id], block_x_mcu[component_id] + block_x_mcu_ofs, _u32Block_y_mcu[component_id] + block_y_mcu_ofs );
+			if(pAC == NULL)
+			{
+				//jpeg_print("%s [%d]\n", __FUNCTION__, __LINE__);
+				continue;
+			}
+			pDC = MDrv_JPEG_coeff_buf_getp( _DC_Coeffs[component_id], block_x_mcu[component_id] + block_x_mcu_ofs, _u32Block_y_mcu[component_id] + block_y_mcu_ofs );
+			if(pDC == NULL)
+			{
+				//jpeg_print("%s [%d]\n", __FUNCTION__, __LINE__);
+				continue;
+			}
+			p[0] = pDC[0];
+			memcpy( &p[1], &pAC[1], 63 * sizeof( BLOCK_TYPE ) );
+
+			if(mcu_block==(_u8Blocks_per_mcu -1)&&mcu_row==(_u16Mcus_per_row - 1)&&(_u16Total_lines_left - gu8Max_mcu_y_size)==0)
+			{
+				G_MDrv_JPEG_do_RLE(p, 1, component_id);   // means it is end of picture
+			}
+			else
+			{
+				G_MDrv_JPEG_do_RLE(p, 0, component_id);
+			}
+
+			if ( _u8Comps_in_scan == 1 )
+			{
+				block_x_mcu[component_id]++;
+			}
+			else
+			{
+				if ( ++block_x_mcu_ofs == _u8Comp_h_samp[component_id] )
+				{
+					block_x_mcu_ofs = 0;
+
+					if ( ++block_y_mcu_ofs == _u8Comp_v_samp[component_id] )
+					{
+						block_y_mcu_ofs = 0;
+
+						block_x_mcu[component_id] += _u8Comp_h_samp[component_id];
+					}
+				}
+			}
+		}
+	}
+
+	if ( _u8Comps_in_scan == 1 )
+	{
+		_u32Block_y_mcu[_u8Comp_list[0]]++;
+	}
+	else
+	{
+		for ( component_num = 0; component_num < _u8Comps_in_scan; component_num++ )
+		{
+			component_id = _u8Comp_list[component_num];
+
+			_u32Block_y_mcu[component_id] += _u8Comp_v_samp[component_id];
+		}
+	}
+}
+
+S16 G_MDrv_JPEG_Progressive_Decode(void)
+{
+	if( _bProgressive_flag==0 )
+		return (JPEG_FAILED);
+
+	if( _u16Total_lines_left == 0 )
+	{
+		return ( JPEG_DONE );
+	}
+
+	while( _u16Total_lines_left > 0 )
+	{
+		G_MDrv_JPEG_load_next_row();
+		_u16Total_lines_left -= gu8Max_mcu_y_size;
+	}
+
+	return (JPEG_OKAY);
+
+}
+
+static EN_JPD_STATUS MDrv_JPEG_WaitDone(void)
+{
+	U16 reg_val;
+
+	reg_val = MHal_JPD_ReadJPDStatus();
+	JPEG_PRINT("JPD Status= %X\n", reg_val);
+
+	if(reg_val & JPD_EVENT_DEC_DONE)
+	{
+		JPEG_PRINT("Decode Done\n");
+		G_MDrv_JPEG_Finalize();
+		//_Pinput_stream->destructor( _Pinput_stream );
+		//g_state = e_DecodeDone;
+
+		return EN_JPD_DECODE_DONE;
+	}
+	else if(reg_val & JPD_EVENT_ERROR_MASK)
+	{
+		// temp patch for protect JPD from writing to illegal memory
+		//MHal_JPD_SW_Pause_Reset();
+
+		JPEG_PRINT("Baseline decode error: %x\n", reg_val);
+		G_MDrv_JPEG_Finalize();
+		//_Pinput_stream->destructor( _Pinput_stream );
+		//g_state = e_DecodeErr;
+		return EN_JPD_DECODE_ERROR;
+	}
+
+	else if(reg_val & JPD_EVENT_MRBL_DONE)
+	{
+		JPEG_PRINT("JPD_EVENT_MRBL_DONE\n");
+		// decode of low portion buffer is done, pre-load buffer to low buffer address
+		return EN_JPD_MRBFL_DONE;
+#if 0
+		if(MDrv_JPEG_PreLoadBuffer(JPEG_BUFFER_LOW)==FALSE)
+		{
+			MDrv_JPEG_Finalize();
+			return true;
+			//_Pinput_stream->destructor( _Pinput_stream );
+
+			//if(MDrv_JPEG_get_error_code()==JPEG_STREAM_READ)
+			//    g_state = e_Idle;
+			//else
+			//    g_state = e_DecodeErr;
+		}
+#endif
+	}
+	else if(reg_val & JPD_EVENT_MRBH_DONE)
+	{
+		JPEG_PRINT("JPD_EVENT_MRBH_DONE\n");
+		// decode of high portion buffer is done, pre-load buffer to high buffer address
+
+		return EN_JPD_MRBFH_DONE;
+		/*
+		   if(MDrv_JPEG_PreLoadBuffer(JPEG_BUFFER_HIGH)==FALSE)
+		   {
+		   MDrv_JPEG_Finalize();
+		   return true;
+		//_Pinput_stream->destructor( _Pinput_stream );
+
+		//if(MDrv_JPEG_get_error_code()==JPEG_STREAM_READ)
+		//    g_state = e_Idle;
+		//else
+		//    g_state = e_DecodeErr;
+		}
+		*/
+	}
+	else
+	{
+		return EN_JPD_DECODING;
+	}
+}
+
+static U16 MDrv_JPEG_get_width( void )
+{
+	return ( _u16Image_x_size );
+}
+
+static U16 MDrv_JPEG_get_height( void )
+{
+	return ( _u16Image_y_size );
+}
+
+static U16 MDrv_JPEG_get_original_width( void )
+{
+	return ( _u16OriginalImage_x_size );
+}
+
+static U16 MDrv_JPEG_get_original_height( void )
+{
+	return ( _u16OriginalImage_y_size );
+}
+
+static void G_JPEGWaitDone(JPEG_PIC_Info *pInfo)
+{
+	U32 u32Count = 0xFFFFFFFF;
+
+	while( u32Count > 0 )
+	{
+		pInfo->enJPDStatus = MDrv_JPEG_WaitDone();
+		switch( pInfo->enJPDStatus )
+		{
+			case EN_JPD_DECODE_DONE:
+				pInfo->u32Width = MDrv_JPEG_get_width();
+				pInfo->u32Height = MDrv_JPEG_get_height();
+				pInfo->u32OriginalWidth= MDrv_JPEG_get_original_width();
+				pInfo->u32OriginalHeight = MDrv_JPEG_get_original_height();
+				return;
+
+			case EN_JPD_MRBFL_DONE:
+			case EN_JPD_MRBFH_DONE:
+			case EN_JPD_DECODE_ERROR:
+				pInfo->u32Width = 0;
+				pInfo->u32Height = 0;
+				return;
+
+			case EN_JPD_DECODING:
+			default:
+				break;
+		}
+		mstar_msleep(1);
+		if((u32Count--) == 0)
+		{
+			JPEG_PRINT("JPEGWaitDone Timeout\n");
+			return;
+		}
+	}
+}
+
+
+
+static int DecodeJPEG(U32 u32InAddr, U32 u32OutAddr, U8 u8JPG_Idx)
+{
+	JPEG_PIC_Info stPicInfo = {0};
+
+	JPEG_PRINT( "\n\n\n-------------------------Start to DecodeJPEG-------------------------\n\n\n" ) ;
+
+#if TIME_TEST
+	U32 ttt ;
+	stimer() ;
+#endif
+
+	G_MDrv_JPEG_SetInitParameter(
+			//0xA2000000, //param.u32ReadBufferAddr,
+			u32InAddr,
+			0x00200000, //param.u32ReadBufferSize,  // 2MB
+			//GOP_BUFFER|0xA0000000, //param.u32WriteBufferAddr,
+			u32OutAddr,
+			u32InAddr+0x00200000, //param.u32InterBufferAddr,
+			0x00400000, //param.u32InterBufferSize, // 4MB
+			1 //param.u8FileReadEnd
+			) ;
+
+#if TIME_TEST
+	ttt = stimer() ;
+	printk( "\n\n\nJPEG 0 Duration: %d.%03d sec, %08X\n\n\n", ttt/12000000, (ttt/12000)%1000, ttt ) ;
+#endif
+
+#define REG_CLKGEN0_BASE                0xBF201600
+#define TOP_REG(addr)               (*((volatile U32*)(REG_CLKGEN0_BASE + ((addr)<<2))))
+	//MHal_JPD_SetClock(U8 on)
+	TOP_REG(0x0035) = 0x08;
+
+	if( !G_MDrv_JPEG_constructor(JPEG_TYPE_MAIN) )
+	{
+		JPEG_PRINT("MDrv_JPEG_constructor Error.\n");
+		return -1;
+	}
+
+#if TIME_TEST
+	ttt = stimer() ;
+	printk( "\n\n\nJPEG 1 Duration: %d.%03d sec, %08X\n\n\n", ttt/12000000, (ttt/12000)%1000, ttt ) ;
+#endif
+
+	if(  !G_MDrv_JPEG_DecodeHeader() )
+	{
+		JPEG_PRINT("MDrv_JPEG_DecodeHeader Error.\n");
+		return -1;
+	}
+	//JPEG_PRINT("%dx%d\n", MDrv_JPEG_get_original_width(), MDrv_JPEG_get_original_height());
+
+#if TIME_TEST
+	ttt = stimer() ;
+	printk( "\n\n\nJPEG 2 Duration: %d.%03d sec, %08X\n\n\n", ttt/12000000, (ttt/12000)%1000, ttt ) ;
+#endif
+
+	if(G_MDrv_JPEG_IsProgressive())
+	{
+		JPEG_PRINT("Progressive\n");
+		G_MDrv_JPEG_Progressive_Decode();
+#if TIME_TEST
+		ttt = stimer() ;
+		printk( "\n\n\nJPEG 3 Duration: %d.%03d sec, %08X\n\n\n", ttt/12000000, (ttt/12000)%1000, ttt ) ;
+#endif
+	}
+	else
+	{
+		JPEG_PRINT("Baseline\n");
+		G_MDrv_JPEG_StartDecode();
+#if TIME_TEST
+		ttt = stimer() ;
+		printk( "\n\n\nJPEG 4 Duration: %d.%03d sec, %08X\n\n\n", ttt/12000000, (ttt/12000)%1000, ttt ) ;
+#endif
+	}
+
+	G_JPEGWaitDone( &stPicInfo );
+#if TIME_TEST
+	ttt = stimer() ;
+	printk( "\n\n\nJPEG 5 Duration: %d.%03d sec, %08X\n\n\n", ttt/12000000, (ttt/12000)%1000, ttt ) ;
+#endif
+	JPEG_PRINT("Image: W= %d  H= %d\n",stPicInfo.u32Width, stPicInfo.u32Height);
+
+	jpegWidth[u8JPG_Idx] = stPicInfo.u32Width ;
+	jpegHeight[u8JPG_Idx] = stPicInfo.u32Height ;
+
+	JPEG_PRINT( "\n\n\n-------------------------End of DecodeJPEG-------------------------\n\n\n" ) ;
+	return 1;
+}
+
+//
+// GE setting
+//-----------------------------------------------------------------
+#define GE_ADRESS                       (0x1400*4)
+#define REG_GE_BASE                     (GE_ADRESS)
+#define REG_GE_EN                       (0x00*4 + (REG_GE_BASE))
+#define REG_GE_CFG                      (0x01*4 + (REG_GE_BASE))
+
+#define REG_GE_STATUS                   (0x07*4 + (REG_GE_BASE))
+
+#define REG_GE_ALPHA_CONST              (0x13*4 + (REG_GE_BASE))
+
+#define REG_GE_SRC_BASE_L               (0x20*4 + (REG_GE_BASE))
+#define REG_GE_SRC_BASE_H               (0x21*4 + (REG_GE_BASE))
+#define REG_GE_DST_BASE_L               (0x26*4 + (REG_GE_BASE))
+#define REG_GE_DST_BASE_H               (0x27*4 + (REG_GE_BASE))
+
+#define REG_GE_SRC_PITCH                (0x30*4 + (REG_GE_BASE))
+#define REG_GE_DST_PITCH                (0x33*4 + (REG_GE_BASE))
+#define REG_GE_FMT                      (0x34*4 + (REG_GE_BASE))
+
+#define REG_GE_CLIP_L                   (0x55*4 + (REG_GE_BASE))
+#define REG_GE_CLIP_R                   (0x56*4 + (REG_GE_BASE))
+#define REG_GE_CLIP_T                   (0x57*4 + (REG_GE_BASE))
+#define REG_GE_CLIP_B                   (0x58*4 + (REG_GE_BASE))
+
+#define REG_GE_ROT                      (0x59*4 + (REG_GE_BASE))
+#define REG_GE_BLT_DST_X_OFST           (0x5E*4 + (REG_GE_BASE))
+#define REG_GE_BLT_DST_Y_OFST           (0x5F*4 + (REG_GE_BASE))
+
+#define REG_GE_CMD                      (0x60*4 + (REG_GE_BASE))
+
+#define REG_GE_BLT_SRC_DX               (0x64*4 + (REG_GE_BASE))
+#define REG_GE_BLT_SRC_DY               (0x65*4 + (REG_GE_BASE))
+#define REG_GE_PRIM_V0_X                (0x68*4 + (REG_GE_BASE))
+#define REG_GE_PRIM_V0_Y                (0x69*4 + (REG_GE_BASE))
+#define REG_GE_PRIM_V1_X                (0x6A*4 + (REG_GE_BASE))
+#define REG_GE_PRIM_V1_Y                (0x6B*4 + (REG_GE_BASE))
+#define REG_GE_PRIM_V2_X                (0x6C*4 + (REG_GE_BASE))
+#define REG_GE_PRIM_V2_Y                (0x6D*4 + (REG_GE_BASE))
+#define REG_GE_BLT_SRC_W                (0x6E*4 + (REG_GE_BASE))
+#define REG_GE_BLT_SRC_H                (0x6F*4 + (REG_GE_BASE))
+
+#define REG_GE_PRIM_C_L                 (0x70*4 + (REG_GE_BASE))
+#define REG_GE_PRIM_C_H                 (0x71*4 + (REG_GE_BASE))
+
+//
+// GOP setting
+//-----------------------------------------------------------------
+#define GOP_ADRESS                      (0xF80*4)
+#define REG_GOP_BASE                    (GOP_ADRESS)
+
+#define REG_GOP_WR_ACK					(0x7f*4 + (REG_GOP_BASE))
+#define REG_GOP_SOFT_RESET              (0x00*4 + (REG_GOP_BASE))
+#define REG_GOP_DEST                    (0x01*4 + (REG_GOP_BASE))
+#define REG_GOP_BLINK                   (0x02*4 + (REG_GOP_BASE))
+#define REG_GOP_GWIN_PRI                (0x20*4 + (REG_GOP_BASE))
+#define REG_GOP_RDMA_HT                 (0x0E*4 + (REG_GOP_BASE))
+#define REG_GOP_HS_PIPE     (0x0F*4 + (REG_GOP_BASE))
+
+#if 0
+#define REG_GOP_GWIN0_EN                (0x60*4+0x00*4 + (REG_GOP_BASE))
+#define REG_GOP_GWIN0_VSTOP_LO			(0x60*4+0x14*4 + (REG_GOP_BASE))
+#define REG_GOP_GWIN0_VSTOP_HI          (0x60*4+0x15*4 + (REG_GOP_BASE))
+#define REG_GWIN_SCROLL_LEN				(0x60*4+0x12*4 + (REG_GOP_BASE))
+#else
+#define REG_GOP_GWIN0_EN      			(0x00*4 + (REG_GOP_BASE))
+#define REG_GOP_GWIN0_VSTOP_LO			(0x14*4 + (REG_GOP_BASE))
+#define REG_GOP_GWIN0_VSTOP_HI			(0x15*4 + (REG_GOP_BASE))
+#define REG_GWIN_SCROLL_LEN   			(0x12*4 + (REG_GOP_BASE))
+#endif
+#define REG_GOP_MUX_SEL       			 (0x7e*4 + (REG_GOP_BASE))
+
+#define REG_GOP_STRCH_HSTART          (0x32*4 + (REG_GOP_BASE))
+#define REG_GOP_STRCH_VSTART          (0x34*4 + (REG_GOP_BASE))
+#define REG_GOP_STRCH_HSIZE           (0x30*4 + (REG_GOP_BASE))
+#define REG_GOP_STRCH_VSIZE           (0x31*4 + (REG_GOP_BASE))
+#define REG_GOP_TRS_CLR_LO            (0x24*4 + (REG_GOP_BASE))
+#define REG_GOP_TRS_CLR_HI            (0x25*4 + (REG_GOP_BASE))
+
+#if 0
+#define REG_GOP_GWIN0_VSTR              (0x60*4+0x06*4 + (REG_GOP_BASE))
+#define REG_GOP_GWIN0_VEND              (0x60*4+0x08*4 + (REG_GOP_BASE))
+#define REG_GOP_GWIN0_HSTR              (0x60*4+0x04*4 + (REG_GOP_BASE))
+#define REG_GOP_GWIN0_HEND              (0x60*4+0x05*4 + (REG_GOP_BASE))
+#else
+#define REG_GOP_GWIN0_VSTR              (0x06*4 + (REG_GOP_BASE))
+#define REG_GOP_GWIN0_VEND              (0x08*4 + (REG_GOP_BASE))
+#define REG_GOP_GWIN0_HSTR              (0x04*4 + (REG_GOP_BASE))
+#define REG_GOP_GWIN0_HEND              (0x05*4 + (REG_GOP_BASE))
+#endif
+#define GWIN_SDRAM_NULL     0x30
+#define GOP_ALIGNMENT       8  //8 byte(64bit) alignment.
+#define GOP_ALIGN_RSHIFT    4  //Right shift 3 byte for HW alignment(64bit).
+#define GOP_RESOURCE_CONTROL 1
+#define GOP_ACK_COUNTER      15 //93000 // About 200Ms
+#define GOP_OP_H_Offset      11//12
+
+#if 0
+#define REG_GOP_DRAM_GWIN0_VSTR_LO      (0x60*4+0x0C*4 + (REG_GOP_BASE))
+#define REG_GOP_DRAM_GWIN0_VSTR_HI      (0x60*4+0x0D*4 + (REG_GOP_BASE))
+#define REG_GOP_DRAM_GWIN0_HSTR         (0x60*4+0x0E*4 + (REG_GOP_BASE))
+#define REG_GOP_DRAM_RBLK0_STR_LO       (0x60*4+0x01*4 + (REG_GOP_BASE))
+#define REG_GOP_DRAM_RBLK0_STR_HI       (0x60*4+0x02*4 + (REG_GOP_BASE))
+#define REG_GOP_DRAM_RBLK0_HSIZE        (0x60*4+0x09*4 + (REG_GOP_BASE))
+#else
+#define REG_GOP_DRAM_GWIN0_VSTR_LO      (0x0C*4 + (REG_GOP_BASE))
+#define REG_GOP_DRAM_GWIN0_VSTR_HI      (0x0D*4 + (REG_GOP_BASE))
+#define REG_GOP_DRAM_GWIN0_HSTR         (0x0E*4 + (REG_GOP_BASE))
+#define REG_GOP_DRAM_RBLK0_STR_LO       (0x01*4 + (REG_GOP_BASE))
+#define REG_GOP_DRAM_RBLK0_STR_HI       (0x02*4 + (REG_GOP_BASE))
+#define REG_GOP_DRAM_RBLK0_HSIZE        (0x09*4 + (REG_GOP_BASE))
+#endif
+#define GOP_DRAM_RBLK_STR_HI_SHIFT      (0)
+#define GOP_DRAM_RBLK_PAGE_SHIFT        (6)
+
+typedef struct
+{
+	U32 DRAM_RBLK_STR_HI:   6;
+	U32 DRAM_RBLK_PAGE:     2;
+	U32 reserved1:          8;
+	U32 reserved:           16;
+} G_GOP_dram_rblk_str_hi;
+
+#if 0
+#define REG_GOP_DRAM_RBLK0_SIZE_LO       (0x60*4+0x10*4 + (REG_GOP_BASE))
+#define REG_GOP_DRAM_RBLK0_SIZE_HI       (0x60*4+0x11*4 + (REG_GOP_BASE))
+#define REG_GOP_DRAM_RBLK0_HSIZE        (0x60*4+0x09*4 + (REG_GOP_BASE))
+#else
+#define REG_GOP_DRAM_RBLK0_SIZE_LO       (0x10*4 + (REG_GOP_BASE))
+#define REG_GOP_DRAM_RBLK0_SIZE_HI       (0x11*4 + (REG_GOP_BASE))
+#define REG_GOP_DRAM_RBLK0_HSIZE         (0x09*4 + (REG_GOP_BASE))
+#endif
+
+typedef struct
+{
+	U32 GWIN_EN:            1; // 0:GOP0, 1:GOP1, 2:GOPD, 3:GOPS
+	U32 GWIN_RSTOP:         1;
+	U32 GWIN_VROLL:         1;
+	U32 GWIN_HROLL:         1;
+	U32 GWIN_DTYPE:         4;
+	U32 GWIN_ALPHA:         6;
+	U32 GWIN_ALPHA_EN:      1;
+	U32 reserved:           17;
+}G_GOP_gwin_set;
+
+
+#define LO16BIT(x)  (x & 0x0000ffff)
+#define HI16BIT(x)  (x >> 16)
+#define _GFXOSD_CALC_STRIDE(bpl)		(((bpl)+15)&0xfffffff0)
+
+#if 0
+static void BurstInitGOP( void )
+{
+
+
+#if (PANEL_TYPE==1366)
+
+	U32 u32DispX = 162 ;
+	U32 u32DispY = 0 ;
+	U32 u32Width = 1366 ;
+	U32 u32Height =768 ;
+
+#elif (PANEL_TYPE==1920)
+
+	U32 u32DispX = 182 ;
+	U32 u32DispY = 0 ;
+	U32 u32Width = 1920 ;
+	U32 u32Height =1080 ;
+
+#endif
+
+	U32 stride = _GFXOSD_CALC_STRIDE( (u32Width<<2) ) ;
+	U32 u32GWinSrcX = 0 ;
+	U32 u32GWinSrcY = 0 ;
+	U32 u32GWinDispX = 0 ;
+	U32 u32GWinDispY = 0 ;
+	U32 u32DRAMRBlkStart = GOP_BUFFER ;
+	U32 u32DRAMRBlkHSize = stride>>2 ;
+	U32 u32DRAMRBlkVSize = u32Height ;
+	U32 u32ColorDepth = 4 ;
+	U32 u32GWINFormat = 5 ; // ARGB8888=5, YUV422=9
+
+	// init for JPEG
+	if( jpegWidth!=0 ){
+		u32Width = jpegWidth ;
+		u32Height = jpegHeight ;
+		stride = _GFXOSD_CALC_STRIDE( (u32Width<<2) ) ;
+		u32DRAMRBlkHSize = stride>>2 ;
+		u32DRAMRBlkVSize = u32Height ;
+		u32ColorDepth = 2 ; // 2 byte for YUV422
+		u32GWINFormat = 9 ; // ARGB8888=5, YUV422=9
+	}
+
+#if TIME_TEST
+	U32 ttt ;
+	stimer() ;
+#endif
+
+	// _MHal_GOP_Init(eGOP_Type);
+	SYS_REGOP( (0xF16<<2) ) &= ~0x1 ; // GOP4G ckg enable
+	SYS_REGOP( REG_GOP_WR_ACK ) |= 0x200 ; // force write
+	SYS_REGOP( REG_GOP_WR_ACK ) &= ~0xF ; // select GOP4G_0
+	SYS_REGOP( REG_GOP_SOFT_RESET ) = 0x4209 ; // into reset state
+
+	SYS_REGOP( REG_GOP_DEST ) &= 0xFFF0 ; // set DMA length and destination:OP
+	SYS_REGOP( REG_GOP_DEST ) |= 0x000A ;
+	SYS_REGOP(REG_GOP_BLINK)   = 0x1500 ;  //disable blink, set blink rate and scroll rate
+	SYS_REGOP(REG_GOP_GWIN_PRI)= 0x3210 ; //GWIN Priority: GWIN0>GWIN1>GWIN2>GWIN3
+	SYS_REGOP(REG_GOP_RDMA_HT) = 0x0000 ;
+
+	SYS_REGOP( REG_GOP_WR_ACK ) |= 0x1 ; // select GOP4G_1
+
+	// init GWIN 3
+	SYS_REGOP(REG_GOP_GWIN0_EN) = 0x3F00;  // Init alpha value, disable H&V scroll, auto stop
+	//initial Scroll auto stop offset
+	SYS_REGOP(REG_GOP_GWIN0_VSTOP_LO) =0x0000;
+	SYS_REGOP(REG_GOP_GWIN0_VSTOP_HI) =0x0000;
+	//initial Scroll Setps
+	SYS_REGOP(REG_GWIN_SCROLL_LEN)   =0x0000;
+
+	SYS_REGOP(REG_GOP_MUX_SEL) &= ~0x003F; // set mux
+	SYS_REGOP( REG_GOP_WR_ACK ) &= ~0xF ; // select GOP4G_0
+	SYS_REGOP( REG_GOP_SOFT_RESET ) = 0x4208 ; // leave reset state
+
+	SYS_REGOP(REG_GOP_STRCH_HSTART) = u32DispX;
+	SYS_REGOP(REG_GOP_STRCH_VSTART) = u32DispY;
+	SYS_REGOP(REG_GOP_STRCH_HSIZE) = u32Width>>1;
+	SYS_REGOP(REG_GOP_STRCH_VSIZE) = u32Height;
+	SYS_REGOP(REG_GOP_RDMA_HT) = (u32Width>>1) + 1;
+
+	SYS_REGOP( REG_GOP_WR_ACK ) |= 0x1 ; // select GOP4G_1
+
+	SYS_REGOP(REG_GOP_GWIN0_VSTR) = u32GWinDispY ; //in pixel
+	SYS_REGOP(REG_GOP_GWIN0_VEND) = u32GWinDispY + u32Height;//in pixel
+
+	SYS_REGOP(REG_GOP_GWIN0_HSTR) = (u32GWinDispX) * u32ColorDepth >> GOP_ALIGN_RSHIFT; //in HW alignment
+	SYS_REGOP(REG_GOP_GWIN0_HEND) = (u32GWinDispX + u32Width) * u32ColorDepth >> GOP_ALIGN_RSHIFT; //in HW alignment
+
+	//Offset to RBLK
+	U32 u32RegVal ;
+	u32RegVal = u32GWinSrcY * u32DRAMRBlkHSize * u32ColorDepth >> GOP_ALIGN_RSHIFT;
+	SYS_REGOP(REG_GOP_DRAM_GWIN0_VSTR_LO) = LO16BIT(u32RegVal);
+	SYS_REGOP(REG_GOP_DRAM_GWIN0_VSTR_HI) = HI16BIT(u32RegVal);
+	u32RegVal = u32GWinSrcX * u32ColorDepth >> GOP_ALIGN_RSHIFT;
+	SYS_REGOP(REG_GOP_DRAM_GWIN0_HSTR) = LO16BIT(u32RegVal);
+
+	//RBLK
+	U32 u32Tmp ;
+	u32Tmp = u32DRAMRBlkStart >> GOP_ALIGN_RSHIFT;
+	SYS_REGOP(REG_GOP_DRAM_RBLK0_STR_LO) = LO16BIT(u32Tmp);
+	u32RegVal = SYS_REGOP(REG_GOP_DRAM_RBLK0_STR_HI);
+	((G_GOP_dram_rblk_str_hi*)&u32RegVal)->DRAM_RBLK_STR_HI = HI16BIT(u32Tmp) >> GOP_DRAM_RBLK_STR_HI_SHIFT;
+	((G_GOP_dram_rblk_str_hi*)&u32RegVal)->DRAM_RBLK_PAGE = HI16BIT(u32Tmp) >> GOP_DRAM_RBLK_PAGE_SHIFT;
+	SYS_REGOP(REG_GOP_DRAM_RBLK0_STR_HI) = u32RegVal;
+
+	u32RegVal = u32DRAMRBlkHSize * u32DRAMRBlkVSize * u32ColorDepth >> GOP_ALIGN_RSHIFT;
+	SYS_REGOP(REG_GOP_DRAM_RBLK0_SIZE_LO) = LO16BIT(u32RegVal);
+	SYS_REGOP(REG_GOP_DRAM_RBLK0_SIZE_HI) = HI16BIT(u32RegVal);
+	u32RegVal = u32DRAMRBlkHSize * u32ColorDepth >> GOP_ALIGN_RSHIFT;
+	SYS_REGOP(REG_GOP_DRAM_RBLK0_HSIZE) = LO16BIT(u32RegVal);
+
+	//Color type
+	u32RegVal = SYS_REGOP(REG_GOP_GWIN0_EN);
+	((G_GOP_gwin_set*)&u32RegVal)->GWIN_DTYPE = u32GWINFormat ; //ARGB8888
+	SYS_REGOP(REG_GOP_GWIN0_EN) = u32RegVal|1; // enablue GWIN too
+
+#if TIME_TEST
+	ttt = stimer() ;
+	printk( "\n\n\nGOP Duration: %d.%03d sec, %08X\n\n\n", ttt/12000000, (ttt/12000)%1000, ttt ) ;
+#endif
+
+#if 0
+	// fill in the color
+	U32 x, y, idx ;
+	U8* pu8 ;
+	pu8 = 0xA0000000|GOP_BUFFER ;
+	idx = 0 ;
+	for( y=0; y<u32Height; y++ ){
+		for( x=0; x<u32Width; x++ ){
+			pu8[idx+(x<<2)] = 0x4C ;
+			pu8[idx+(x<<2)+1] = 0xFF ;
+			pu8[idx+(x<<2)+2] = 0x4C ;
+			pu8[idx+(x<<2)+3] = 0x54 ;
+		}
+		idx += stride ;
+	}
+#endif
+
+}
+#else
+static void BurstInitGOP(void)
+{
+	U32 u32DispX = 182 ;
+	U32 u32DispY = 0 ;
+	U32 u32Width = 1920 ;
+	U32 u32Height =1080 ;
+
+	// 091125_KimTH_01: PDP boot logo 대응
+	if (Splash_GetHWoption(PANEL_RES_OPT_SEL) == PANEL_RES_XGA)
+	{
+		u32DispX		= 252;
+		u32DispY 	= 0;
+		u32Width 	= 1024;
+		u32Height 	= 768;
+	}
+	else if (Splash_GetHWoption(PANEL_RES_OPT_SEL) == PANEL_RES_WXGA)
+	{
+		u32DispX = 156 ;
+		u32DispY = 1 ;
+		u32Width = 1366 ;
+		u32Height =768 ;
+	}
+	else if((gToolOptionDB.nToolOption1.flags.eModelModuleType == MODULE_IPS) && (Splash_GetHWoption(PANEL_RES_OPT_SEL) == PANEL_RES_FULL_HD))
+	{
+		u32DispX = 0 ;
+		u32DispY = 0 ;
+		u32Width = 1920 ;
+		u32Height =1080 ;
+	}
+        else if((gToolOptionDB.nToolOption1.flags.eModelModuleType == MODULE_IPS) && (Splash_GetHWoption(PANEL_RES_OPT_SEL) == PANEL_RES_WXGA))
+        {
+		u32DispX = 0 ;
+		u32DispY = 0 ;
+		u32Width = 1366 ;
+		u32Height =768 ;
+        }
+       else
+       {
+		u32DispX = 182 ;
+		u32DispY = 0 ;
+		u32Width = 1920 ;
+		u32Height =1080 ;
+	}
+
+#if TIME_TEST
+	U32 ttt ;
+	stimer() ;
+#endif
+	// _MHal_GOP_Init(eGOP_Type);
+	SYS_REGOP( (0xF16<<2) ) &= ~0x1 ; // GOP4G ckg enable
+	SYS_REGOP( REG_GOP_WR_ACK ) |= 0x200 ; // force write
+	SYS_REGOP( REG_GOP_WR_ACK ) &= ~0xF ; // select GOP4G_0
+	SYS_REGOP( REG_GOP_WR_ACK ) |= u8GOP ; // select GOP4G_0
+	SYS_REGOP( REG_GOP_SOFT_RESET ) = 0x4A09 ; // into reset state
+
+	SYS_REGOP( REG_GOP_DEST ) &= 0xFFF0 ; // set DMA length and destination:OP
+	SYS_REGOP( REG_GOP_DEST ) |= 0x000A ;
+	SYS_REGOP(REG_GOP_BLINK)   = 0x1500 ;  //disable blink, set blink rate and scroll rate
+	SYS_REGOP(REG_GOP_GWIN_PRI)= 0x3210 ; //GWIN Priority: GWIN0>GWIN1>GWIN2>GWIN3
+	SYS_REGOP(REG_GOP_RDMA_HT) = 0x0000 ;
+
+	SYS_REGOP( REG_GOP_WR_ACK ) &= ~0xF ; // select GOP4G_0
+	SYS_REGOP( REG_GOP_WR_ACK ) |= (u8GOP + 1) ; // select GOP4G_0
+
+	//initial Scroll Setps
+	SYS_REGOP(REG_GWIN_SCROLL_LEN)   =0x0000;
+
+	SYS_REGOP(REG_GOP_MUX_SEL) &= ~0x00FF; // set mux
+	SYS_REGOP(REG_GOP_MUX_SEL) |= 0x00E4; //0x0001; // set mux
+
+	SYS_REGOP( REG_GOP_WR_ACK ) &= ~0xF ; // select GOP4G_0
+	SYS_REGOP( REG_GOP_WR_ACK ) |= u8GOP ; // select GOP4G_0
+
+	SYS_REGOP( REG_GOP_SOFT_RESET ) = 0x4A08 ; // leave reset state
+
+	SYS_REGOP(REG_GOP_STRCH_HSTART) = u32DispX;
+	SYS_REGOP(REG_GOP_STRCH_VSTART) = u32DispY;
+	SYS_REGOP(REG_GOP_STRCH_HSIZE) = u32Width>>1;
+	SYS_REGOP(REG_GOP_STRCH_VSIZE) = u32Height;
+	SYS_REGOP(REG_GOP_RDMA_HT) = (u32Width>>1) + 1;
+
+       if((gToolOptionDB.nToolOption1.flags.eModelModuleType == MODULE_IPS) && (Splash_GetHWoption(PANEL_RES_OPT_SEL) == PANEL_RES_FULL_HD))
+        	SYS_REGOP(REG_GOP_HS_PIPE) = 0xB6;
+
+	SYS_REGOP( REG_GOP_WR_ACK ) &= ~0xF ; // select GOP4G_0
+	SYS_REGOP( REG_GOP_WR_ACK ) |= (u8GOP+1) ; // select GOP4G_0
+
+#if TIME_TEST
+	ttt = stimer() ;
+	printk( "\n\n\nGOP Duration: %d.%03d sec, %08X\n\n\n", ttt/12000000, (ttt/12000)%1000, ttt ) ;
+#endif
+}
+
+static void BurstYUV422(U16 u16X, U16 u16Y, U32 u32InAddr, U32 u32OutAddr, U8 u8GWinIdx, U8 u8JPG_Idx)
+{
+	// cleare the rotate setting
+	SYS_REGOP( REG_GE_ROT ) &= ~0x3 ;
+
+	SYS_REGOP( REG_GE_ALPHA_CONST ) = 0xFF;
+
+	// Set color format --> source: YUV422, destination: ARGB8888
+	SYS_REGOP( REG_GE_FMT ) = 0x0E0E;
+
+	// Set source address
+	SYS_REGOP(REG_GE_SRC_BASE_L) = u32InAddr & 0xFFFF;
+	SYS_REGOP(REG_GE_SRC_BASE_H) = ((u32InAddr >> 16) & 0x0FFF);
+
+	// Set source pitch
+	SYS_REGOP(REG_GE_SRC_PITCH) =  jpegWidth[u8JPG_Idx] * 2;
+
+	// Set destination address
+	SYS_REGOP(REG_GE_DST_BASE_L) = u32OutAddr & 0xFFFF;
+	if (0x10000000 <= u32OutAddr)   // Check if in MIU1
+	{
+		SYS_REGOP(REG_GE_DST_BASE_H) = ((u32OutAddr >> 16) & 0x0FFF) | 0x8000;
+	}
+	else
+	{
+		SYS_REGOP(REG_GE_DST_BASE_H) = ((u32OutAddr >> 16) & 0x0FFF);
+	}
+
+	// Set destination pitch
+	SYS_REGOP(REG_GE_DST_PITCH) =  _Gwin_info[u8GWinIdx].u32Width * 2;
+
+	SYS_REGOP(REG_GE_CLIP_L) = 0;
+	SYS_REGOP(REG_GE_CLIP_R) = _Gwin_info[u8GWinIdx].u32Width;
+	SYS_REGOP(REG_GE_CLIP_T) = 0;
+	SYS_REGOP(REG_GE_CLIP_B) = _Gwin_info[u8GWinIdx].u32Height;
+
+	SYS_REGOP( REG_GE_BLT_SRC_DX ) = 0x1000 ;   // not scaling
+	SYS_REGOP( REG_GE_BLT_SRC_DY ) = 0x1000 ;
+	SYS_REGOP( REG_GE_BLT_DST_X_OFST ) &= ~(0x1FFF) ;
+	SYS_REGOP( REG_GE_BLT_DST_Y_OFST ) &= ~(0x1FFF) ;
+
+	SYS_REGOP( REG_GE_PRIM_V0_X ) = u16X;                // Destination
+	SYS_REGOP( REG_GE_PRIM_V0_Y ) = u16Y;
+	SYS_REGOP( REG_GE_PRIM_V1_X ) = u16X + jpegWidth[u8JPG_Idx] - 1;
+	SYS_REGOP( REG_GE_PRIM_V1_Y ) = u16Y + jpegHeight[u8JPG_Idx] - 1;
+	SYS_REGOP( REG_GE_PRIM_V2_X ) = 0;                 // Source
+	SYS_REGOP( REG_GE_PRIM_V2_Y ) = 0;
+	SYS_REGOP( REG_GE_BLT_SRC_W ) = jpegWidth[u8JPG_Idx];
+	SYS_REGOP( REG_GE_BLT_SRC_H ) = jpegHeight[u8JPG_Idx];
+
+	SYS_REGOP( REG_GE_CFG ) = 0x1;
+
+	SYS_REGOP( REG_GE_CMD ) = 0x40;
+
+#if 1
+	int tt = 0;
+	U32 ts = get_cur_time();
+	while (((SYS_REGOP(REG_GE_STATUS)&0x01)))
+	{
+		tt++ ;
+		asm volatile
+			(
+			 "nop;"
+			);
+		if( (tt&0xFFFFF)==0 )
+		{
+			printk("[JPEG Idx=%d] GE is busy (%d ms)\n", u8JPG_Idx, get_cur_time()-ts);
+			break ;
+		}
+	}
+#if 0
+	tt = 0;
+	while (((SYS_REGOP(REG_GE_STATUS)&0xF800)>>11) != 0xF8)
+	{
+		tt++;
+		if (0 == (0xFFFFFF & tt))
+		{
+			printk("[GE INFO] GE wait command queue\n");
+			break;
+		}
+	}
+#endif
+
+#else
+	printf("v1 = (%d, %d), v2 = (%d, %d)\n", u16X, u16Y,
+			u16X + jpegWidth[u8JPG_Idx] - 1, u16Y + jpegHeight[u8JPG_Idx] - 1);
+	printf("--> Reg v1 = (%d, %d), v2 = (%d, %d)\n\n\n",
+			SYS_REGOP( REG_GE_PRIM_V0_X ),
+			SYS_REGOP( REG_GE_PRIM_V0_Y ),
+			SYS_REGOP( REG_GE_PRIM_V1_X ),
+			SYS_REGOP( REG_GE_PRIM_V1_Y ));
+#endif
+
+}
+
+static void BurstInitGWIN(U32 u32OutAddr, U8 u8GWinIdx)
+{
+	U32 u32Width = _Gwin_info[u8GWinIdx].u32Width;
+	U32 u32Height = _Gwin_info[u8GWinIdx].u32Height;
+
+	U32 stride = _GFXOSD_CALC_STRIDE( (u32Width<<2) ) ;
+	U32 u32GWinSrcX = 0 ;
+	U32 u32GWinSrcY = 0 ;
+	//    U32 u32GWinDispX_End = u32GWinDispX_Max;
+	//    U32 u32GWinDispY_End = u32GWinDispY_Max;
+	//U32 u32DRAMRBlkStart = GOP_BUFFER ;
+	U32 u32DRAMRBlkStart = u32OutAddr;
+	U32 u32DRAMRBlkHSize = stride>>2 ;
+	U32 u32DRAMRBlkVSize = u32Height ;
+	U32 u32ColorDepth = 2 ; // 2 byte for YUV422
+	U32 u32GWINFormat = 9 ; // ARGB8888=5, YUV422=9
+	U32 u32GWinRegOffset = 0;
+	G_GOP_gwin_set *pGWinSet;
+
+#if TIME_TEST
+	U32 ttt ;
+	stimer() ;
+#endif
+
+	if (u8GWinIdx > 3) // We have GWIN 0, 1, 2, 3
+		return;
+
+	if (u32OutAddr < 0x10000000)
+	{
+
+		SYS_REGOP((0x900+0x79)<<2) &= ~0x01F0;
+	}
+	else
+	{
+
+		SYS_REGOP((0x900+0x79)<<2) |= 0x01F0;
+	}
+
+	// Calculate GWIN register base offset
+	u32GWinRegOffset = (0x20 * u8GWinIdx) * 4;
+
+	SYS_REGOP( REG_GOP_WR_ACK ) &= ~0xF ; // select GOP4G_0
+	SYS_REGOP( REG_GOP_WR_ACK ) |= (u8GOP + 1) ;  // select GOP4G_1
+
+	// init GWIN 3
+	SYS_REGOP(u32GWinRegOffset+REG_GOP_GWIN0_EN) = 0x3F90;  // Init alpha value, disable H&V scroll, auto stop
+	//initial Scroll auto stop offset
+	SYS_REGOP(u32GWinRegOffset+REG_GOP_GWIN0_VSTOP_LO) =0x0000;
+	SYS_REGOP(u32GWinRegOffset+REG_GOP_GWIN0_VSTOP_HI) =0x0000;
+
+#if 0  // alan comments for test SetGWin
+	SYS_REGOP(u32GWinRegOffset+REG_GOP_GWIN0_VSTR) = u32GWinDispY ; //in pixel
+	//SYS_REGOP(REG_GOP_GWIN0_VEND) = u32GWinDispY + u32Height;//in pixel
+	if (u32GWinDispY + u32Height <= u32GWinDispY_Max)
+		u32GWinDispY_End = u32GWinDispY + u32Height;
+	SYS_REGOP(u32GWinRegOffset+REG_GOP_GWIN0_VEND) = u32GWinDispY_End;//in pixel
+
+	SYS_REGOP(u32GWinRegOffset+REG_GOP_GWIN0_HSTR) = (u32GWinDispX) * u32ColorDepth >> GOP_ALIGN_RSHIFT; //in HW alignment
+	//SYS_REGOP(REG_GOP_GWIN0_HEND) = (u32GWinDispX + u32Width) * u32ColorDepth >> GOP_ALIGN_RSHIFT; //in HW alignment
+	if (u32GWinDispX + u32Width <= u32GWinDispX_Max)
+		u32GWinDispX_End = u32GWinDispX + u32Width;
+	SYS_REGOP(u32GWinRegOffset+REG_GOP_GWIN0_HEND) = u32GWinDispX_End * u32ColorDepth >> GOP_ALIGN_RSHIFT; //in HW alignment
+#endif
+
+	//Offset to RBLK
+	U32 u32RegVal ;
+	u32RegVal = u32GWinSrcY * u32DRAMRBlkHSize * u32ColorDepth >> GOP_ALIGN_RSHIFT;
+	SYS_REGOP(u32GWinRegOffset+REG_GOP_DRAM_GWIN0_VSTR_LO) = LO16BIT(u32RegVal);
+	SYS_REGOP(u32GWinRegOffset+REG_GOP_DRAM_GWIN0_VSTR_HI) = HI16BIT(u32RegVal);
+	u32RegVal = u32GWinSrcX * u32ColorDepth >> GOP_ALIGN_RSHIFT;
+	SYS_REGOP(u32GWinRegOffset+REG_GOP_DRAM_GWIN0_HSTR) = LO16BIT(u32RegVal);
+
+	//RBLK
+	U32 u32Tmp ;
+	u32Tmp = u32DRAMRBlkStart >> GOP_ALIGN_RSHIFT;
+	SYS_REGOP(u32GWinRegOffset+REG_GOP_DRAM_RBLK0_STR_LO) = LO16BIT(u32Tmp);
+#if 0
+	u32RegVal = SYS_REGOP(u32GWinRegOffset+REG_GOP_DRAM_RBLK0_STR_HI);
+	((G_GOP_dram_rblk_str_hi*)&u32RegVal)->DRAM_RBLK_STR_HI = HI16BIT(u32Tmp) >> GOP_DRAM_RBLK_STR_HI_SHIFT;
+	((G_GOP_dram_rblk_str_hi*)&u32RegVal)->DRAM_RBLK_PAGE = HI16BIT(u32Tmp) >> GOP_DRAM_RBLK_PAGE_SHIFT;
+#else
+	u32RegVal = HI16BIT(u32Tmp) & 0x1FF;
+#endif
+	SYS_REGOP(u32GWinRegOffset+REG_GOP_DRAM_RBLK0_STR_HI) = u32RegVal;
+
+	u32RegVal = u32DRAMRBlkHSize * u32DRAMRBlkVSize * u32ColorDepth >> GOP_ALIGN_RSHIFT;
+	SYS_REGOP(u32GWinRegOffset+REG_GOP_DRAM_RBLK0_SIZE_LO) = LO16BIT(u32RegVal);
+	SYS_REGOP(u32GWinRegOffset+REG_GOP_DRAM_RBLK0_SIZE_HI) = HI16BIT(u32RegVal);
+	u32RegVal = u32DRAMRBlkHSize * u32ColorDepth >> GOP_ALIGN_RSHIFT;
+	SYS_REGOP(u32GWinRegOffset+REG_GOP_DRAM_RBLK0_HSIZE) = LO16BIT(u32RegVal);
+
+	//Color type
+	u32RegVal = SYS_REGOP(u32GWinRegOffset+REG_GOP_GWIN0_EN);
+	pGWinSet = (G_GOP_gwin_set*) &u32RegVal;
+	pGWinSet->GWIN_DTYPE = u32GWINFormat; //ARGB8888
+	SYS_REGOP(u32GWinRegOffset+REG_GOP_GWIN0_EN) = u32RegVal|1; // enablue GWIN too
+
+#if TIME_TEST
+	ttt = stimer() ;
+	printk( "\n\n\nGOP Duration: %d.%03d sec, %08X\n\n\n", ttt/12000000, (ttt/12000)%1000, ttt ) ;
+#endif
+}
+
+void BurstSetGWIN(U32 x, U32 y, U32 u32Width, U32 u32Height, U8 u8GWinIdx)
+{
+	U32 u32GWinDispX_Max = 1920 ;
+	U32 u32GWinDispY_Max =1080 ;
+
+	// 091125_KimTH_01: PDP boot logo 대응
+	if (Splash_GetHWoption(PANEL_RES_OPT_SEL) == PANEL_RES_XGA)
+	{
+		u32GWinDispX_Max = 1024;
+		u32GWinDispY_Max = 768;
+	}
+	else if (Splash_GetHWoption(PANEL_RES_OPT_SEL) == PANEL_RES_WXGA)
+	{
+		u32GWinDispX_Max = 1366;
+		u32GWinDispY_Max = 768;
+	}
+	else
+	{
+		u32GWinDispX_Max = 1920 ;
+		u32GWinDispY_Max = 1080 ;
+	}
+
+	//		U32 u32GWinSrcX = 0 ;
+	//		U32 u32GWinSrcY = 0 ;
+	U32 u32GWinDispX = x;
+	U32 u32GWinDispY = y;
+	U32 u32GWinDispX_End = u32GWinDispX_Max;
+	U32 u32GWinDispY_End = u32GWinDispY_Max;
+	U32 u32ColorDepth = 2 ; // 2 byte for YUV422
+	//		U32 u32GWINFormat = 9 ; // ARGB8888=5, YUV422=9
+	U32 u32GWinRegOffset = 0;
+
+
+	if (u8GWinIdx > 3) // We have GWIN 0, 1, 2, 3
+		return;
+
+	// Calculate GWIN register base offset
+	u32GWinRegOffset = (0x20 * u8GWinIdx) * 4;
+
+	SYS_REGOP( REG_GOP_WR_ACK ) &= ~0x0F ; // select GOP4G_0
+	SYS_REGOP( REG_GOP_WR_ACK ) |= (u8GOP + 1) ;  // select GOP4G_1
+
+	// init GWIN 3
+	SYS_REGOP(u32GWinRegOffset+REG_GOP_GWIN0_EN) = 0x3F90;  // Init alpha value, disable H&V scroll, auto stop
+	//initial Scroll auto stop offset
+	SYS_REGOP(u32GWinRegOffset+REG_GOP_GWIN0_VSTOP_LO) =0x0000;
+	SYS_REGOP(u32GWinRegOffset+REG_GOP_GWIN0_VSTOP_HI) =0x0000;
+
+	SYS_REGOP(u32GWinRegOffset+REG_GOP_GWIN0_VSTR) = u32GWinDispY ; //in pixel
+	if (u32GWinDispY + u32Height <= u32GWinDispY_Max)
+		u32GWinDispY_End = u32GWinDispY + u32Height;
+	SYS_REGOP(u32GWinRegOffset+REG_GOP_GWIN0_VEND) = u32GWinDispY_End;//in pixel
+
+	SYS_REGOP(u32GWinRegOffset+REG_GOP_GWIN0_HSTR) = (u32GWinDispX) * u32ColorDepth >> GOP_ALIGN_RSHIFT; //in HW alignment
+	if (u32GWinDispX + u32Width <= u32GWinDispX_Max)
+		u32GWinDispX_End = u32GWinDispX + u32Width;
+	SYS_REGOP(u32GWinRegOffset+REG_GOP_GWIN0_HEND) = u32GWinDispX_End * u32ColorDepth >> GOP_ALIGN_RSHIFT; //in HW alignment
+
+}
+
+#endif
+
+extern void MAdp_MFC_Init(PMST_MFC_SYS_INFO_t mfcSysInfo, U8 u8IsS7M);
+extern void MDrv_MFC_WriteByteMask(U16 u16Addr, U8 u8Val, U8 u8Mask);
+extern BOOL MDrv_MFC_WriteByte(U16 u16Addr, U8 u8Val);
+
+extern void MAdp_MFC_SetReverseControl(U8 u8Mode);
+extern MST_MFC_SYS_INFO_t LCD_INFO_MINI_LVDS_NONGIP;
+extern MST_MFC_SYS_INFO_t PDP_LG42_WUXGA;
+extern MST_MFC_SYS_INFO_t LCD_INFO_MINI_LVDS_GIP;
+extern MST_MFC_SYS_INFO_t LCD_INFO_LVDS_60Hz;
+extern MST_MFC_SYS_INFO_t LCD_INFO_NORMAL_LVDS;
+extern BOOL MDrv_MFC_WriteByte(U16 u16Addr, U8 u8Val);
+
+
+
+SC_TCON_POW_SEQ_INFO_t	tconpower_sequence;
+
+void PowerSeq_Scaler(void)
+{
+#if USE_MEASURE_TIME
+	U32 u32Timer;
+#endif
+#if TIME_TEST
+	U32 ttt ;
+	stimer();
+#endif
+	UINT32					nvmData;
+	SC_TCON_MAP_t			tconmapinfo;
+
+	/*** Scaler Init Start ***/
+	printf("[%4d] Scaler REG Init: ", get_cur_time());
+
+	DDI_NVM_Read(SYS_DB_BASE , sizeof(gSysNvmDB.validMark), (UINT8 *)&(nvmData));
+	if(nvmData != 0xffffffff)
+	{
+		DDI_NVM_Read(SYS_DB_BASE + (UINT32)&(gSysNvmDB.ColorDepth) - (UINT32)&gSysNvmDB,			\
+				sizeof(gSysNvmDB.ColorDepth), (UINT8 *)&(gSysNvmDB.ColorDepth));
+	}
+	else
+	{
+		if(Splash_GetHWoption(PANEL_RES_OPT_SEL) != PANEL_RES_FULL_HD)
+		{
+			gSysNvmDB.ColorDepth = 0; //color depth 8bit
+		}
+	}
+
+           if((gToolOptionDB.nToolOption1.flags.eModelModuleType == MODULE_AUO) ||
+            (gToolOptionDB.nToolOption1.flags.eModelModuleType == MODULE_CMO))
+    Splash_MICOM_PanelOn();
+
+#if USE_MEASURE_TIME
+	stimer_sc(0) ;
+#endif
+	// 091125_KimTH_01: PDP boot logo 대응
+	if(Splash_GetHWoption(PANEL_RES_OPT_SEL) == PANEL_RES_XGA)
+	{
+		printf("XGA Panel, ");
+		MDrv_SC_Init(PANEL_RES_XGA, LPLL_LVDS);
+	}
+	else if(Splash_GetHWoption(PANEL_RES_OPT_SEL) == PANEL_RES_WXGA)
+	{
+		printf("HD Panel, ");
+		//HD panel이면, 무조건 No-FRC 임.
+		MDrv_SC_Init(PANEL_RES_WXGA, LPLL_LVDS);	
+	}
+	else
+	{
+		printf("FHD Panel, ");
+		//No FRC 
+		if((!Splash_GetHWoption(FRC_OPT_SEL)) && (!Splash_GetHWoption(FRC_OPT1_SEL)))
+		{
+			//S7 Tcon 	
+			if(Splash_GetHWoption(LVDS_OPT_SEL))
+			{
+				printf("S7 TCON\n");
+
+				if(gToolOptionDB.nToolOption1.flags.eModelInchType == INCH_32) 
+				{
+					printf("S7 TCON 32inch\n");
+		        	tconmapinfo.u16tconpanelIdx = TCON_PANEL_LG32;
+				}
+				else if(gToolOptionDB.nToolOption1.flags.eModelInchType == INCH_47)
+				{
+					printf("S7 TCON 47inch\n");
+					tconmapinfo.u16tconpanelIdx = TCON_PANEL_LG47;
+				}
+				else
+				{
+					printf("S7 TCON 42inch\n");
+					tconmapinfo.u16tconpanelIdx = TCON_PANEL_LG42;
+				}
+
+                MDrv_SC_TCON_Init_Flow(PANEL_RES_FULL_HD, LPLL_MINILVDS, tconmapinfo.u16tconpanelIdx);
+
+				tconpower_sequence.u16tconpanelIdx = tconmapinfo.u16tconpanelIdx;
+		        tconpower_sequence.benable = 1;
+		    }
+			//S7 LVDS 
+			else
+			{
+				printf("S7\n");
+				MDrv_SC_Init(PANEL_RES_FULL_HD, LPLL_LVDS);
+			}
+		}
+		else if((Splash_GetHWoption(FRC_OPT_SEL)) && (!Splash_GetHWoption(FRC_OPT1_SEL))) //S7M URSA3 Internal	
+		{
+			printf("S7M URSA3 Internal\n");
+			 if (MAdp_MFC_ReadByte(0x1E3D) <= 1) //URSA3 U01/2
+	        {
+	        printf("S7M URSA3 Internal LPLL_LVDS\n");
+	        	MDrv_SC_Init(PANEL_RES_FULL_HD, LPLL_LVDS);
+	        }
+	        else
+	        {
+	        printf("S7M URSA3 Internal LPLL_TTL\n");
+	       		MDrv_SC_Init(PANEL_RES_FULL_HD, LPLL_TTL);
+	        }			
+		}
+		else if(!(Splash_GetHWoption(FRC_OPT_SEL)) && (Splash_GetHWoption(FRC_OPT1_SEL))) //S7 PWIZ panel (LG FRC) T480Hz 
+		{
+			printf("S7 PWIZ LG-FRC\n");
+			MDrv_SC_Init(PANEL_RES_FULL_HD, LPLL_LVDS);
+		}
+		else //URSA3 External FRC
+		{
+			printf("URSA3 External FRC\n");
+			MDrv_SC_Init(PANEL_RES_FULL_HD, LPLL_LVDS);
+		}
+	}
+}
+
+void PowerSeq_TCON_SOE_POL(void)
+{
+    MDrv_SC_Set_TCONPower_Sequence(tconpower_sequence, SC_SIGNAL_SOE);
+    MDrv_SC_Set_TCONPower_Sequence(tconpower_sequence, SC_SIGNAL_POL);
+}
+
+void PowerSeq_GPIO_DPM_HCONV(void)
+{
+    MHal_GPIO_REG(REG_TEST_MODE)	&= ~(BIT2|BIT1|BIT0);
+    MHal_GPIO_REG(REG_TEST_MODE)	&= ~(BIT6|BIT5|BIT4);
+    MHal_GPIO_REG(REG_GPIO8_OEN)	&= ~BIT0;
+    MHal_GPIO_REG(REG_GPIO8_OUT)	|=  BIT0;
+
+    MHal_GPIO_REG(REG_TEST_MODE)	&= ~(BIT2|BIT1|BIT0);
+    MHal_GPIO_REG(REG_TEST_MODE)	&= ~(BIT6|BIT5|BIT4);
+    MHal_GPIO_REG(REG_GPIO9_OEN)	&= ~BIT1;
+    MHal_GPIO_REG(REG_GPIO9_OUT)	|=  BIT1;
+}
+
+void PowerSeq_TCON_VDD_EVEN_ODD(void)
+{
+    MDrv_SC_Set_TCONPower_Sequence(tconpower_sequence, SC_SIGNAL_VGH);
+}
+
+void PowerSeq_TCON_VST(void)
+{
+    MDrv_SC_Set_TCONPower_Sequence(tconpower_sequence, SC_SIGNAL_VST);
+}
+
+void PowerSeq_TCON_GCLK(void)
+{
+    MDrv_SC_Set_TCONPower_Sequence(tconpower_sequence, SC_SIGNAL_GLK);
+}
+
+void PowerSeq_MFC(void)
+{
+
+	if(!( Splash_GetHWoption(FRC_OPT_SEL)) && !(Splash_GetHWoption(FRC_OPT1_SEL))) return;
+
+	printf("[%4d] URSA Init: ", get_cur_time());
+
+	if( Splash_GetHWoption(LVDS_OPT_SEL))
+	{
+		printf("Mini LVDS, ");
+		if(( Splash_GetHWoption(FRC_OPT_SEL)) && (!Splash_GetHWoption(FRC_OPT1_SEL))) //S7M URSA3 Internal
+		{
+			if( Splash_GetHWoption(GIP_OPT_SEL))
+			{
+				printf("FRC, GIP V5 module\n");
+				if(	(gToolOptionDB.nToolOption3.flags.eBackLight == BL_CCFL) ||
+					(gToolOptionDB.nToolOption3.flags.eBackLight == BL_CCFL_VCOM))
+				{
+					switch(gToolOptionDB.nToolOption1.flags.eModelInchType)
+					{
+						case INCH_32:
+							printf("============== 32inch MINI LVDS GIP Lamp V5 module init ================\n");
+							LCD_INFO_MINI_LVDS_GIP.eTconType = GIP_32_LAMP_120;
+							MAdp_MFC_Init(&LCD_INFO_MINI_LVDS_GIP, TRUE);
+							printf("GIP CCFL 120Hz 32inch Setpu/Hold Register setting....\n");
+							break;
+						case INCH_37:
+							printf("============== 37inch MINI LVDS GIP Lamp V5 module init ================\n");
+							LCD_INFO_MINI_LVDS_GIP.eTconType = GIP_DEFAULT_120;
+							MAdp_MFC_Init(&LCD_INFO_MINI_LVDS_GIP, TRUE);
+							printf("GIP CCFL 120Hz 37inch Setpu/Hold Register setting....\n");
+							break;
+						case INCH_42:
+							printf("============== 42inch MINI LVDS GIP Lamp V5 module init ================\n");
+							LCD_INFO_MINI_LVDS_GIP.eTconType = GIP_42_LAMP_120;
+							MAdp_MFC_Init(&LCD_INFO_MINI_LVDS_GIP, TRUE);
+							printf("GIP CCFL 120Hz 42inch Setpu/Hold Register setting....\n");
+							break;
+						case INCH_47:	
+							printf("============== 47inch MINI LVDS GIP Lamp V5 module init ================\n");
+							LCD_INFO_MINI_LVDS_GIP.eTconType = GIP_47_LAMP_120;												
+							MAdp_MFC_Init(&LCD_INFO_MINI_LVDS_GIP, TRUE);
+							printf("GIP CCFL 120Hz 47inch Setpu/Hold Register setting....\n");
+							break;					
+						case INCH_55:
+						default:
+							printf("============== default MINI LVDS GIP Lamp V5 module init ================\n");
+							MAdp_MFC_Init(&LCD_INFO_MINI_LVDS_GIP, TRUE);
+							break;
+					}
+				}
+				else if(gToolOptionDB.nToolOption3.flags.eBackLight == BL_EDGE_LED|| gToolOptionDB.nToolOption3.flags.eBackLight == BL_IOP_LED)
+				{
+					switch(gToolOptionDB.nToolOption1.flags.eModelInchType)
+					{
+					case INCH_32:
+					case INCH_42:
+					case INCH_37:
+					case INCH_47:
+					default:
+						printf("============== All inch MINI LVDS GIP EDGE IOP LED V5 module init ================\n");
+						MAdp_MFC_Init(&LCD_INFO_MINI_LVDS_GIP, TRUE);
+						printf("GIP EDGE IOP LED 120Hz Setpu/Hold Register setting....\n");
+						break;
+        				}	
+				}
+				else
+				{
+					printf("============== All inch MINI LVDS GIP V5 default module init ================\n");
+					MAdp_MFC_Init(&LCD_INFO_MINI_LVDS_GIP, 1);
+
+				}
+			}
+			else	//non GIP
+			{				
+				printf("============== All inch MINI LVDS nonGIP V5 module init ================\n");
+				MAdp_MFC_Init(&LCD_INFO_MINI_LVDS_NONGIP, 1);
+
+				printf("non GIP 120Hz all inch Setpu/Hold Register setting....\n");
+			}
+
+                     MAdp_MFC_WriteByte(0x324f, 0x11);
+                     MAdp_MFC_WriteByte(0x3252, 0x00);
+                     MAdp_MFC_WriteByte(0x3253, 0xc0);
+                     MAdp_MFC_WriteByte(0x3276, 0xfc);
+                     MAdp_MFC_WriteByte(0x3277, 0xff);
+                     MAdp_MFC_WriteByte(0x324a, 0x10);
+                     MAdp_MFC_WriteByte(0x324c, 0x02);
+                     MAdp_MFC_WriteByte(0x3250, 0x5e);
+            
+			MDrv_MFC_WriteByteMask(0x2c45, 0x10, 0x10);
+		}
+		else
+		{
+			printf("S7 Tcon case\n");
+		}
+	}
+	else
+	{
+		printf("LVDS, ");
+		if(( Splash_GetHWoption(FRC_OPT_SEL)) && (!Splash_GetHWoption(FRC_OPT1_SEL))) //S7M URSA3 Internal
+		{
+			printf("S7M URSA3 Internal FRC\n");
+			MAdp_MFC_Init(&LCD_INFO_NORMAL_LVDS, 1);
+			MDrv_MFC_WriteByteMask(0x2c45, 0x10, 0x10);
+		}
+		else if((!Splash_GetHWoption(FRC_OPT_SEL)) && (Splash_GetHWoption(FRC_OPT1_SEL))) //S7 PWIZ LG FRC
+		{
+			printf("S7 PWIZ LG FRC\n");
+		}
+		else if(( Splash_GetHWoption(FRC_OPT_SEL)) && (Splash_GetHWoption(FRC_OPT1_SEL))) //URSA3 External FRC
+		{
+			printf("URSA3 External FRC\n");
+		}
+		else
+		{
+			printf("No FRC\n");
+		}		
+	}
+	
+	printf("[%4d] End of MFC init\n", get_cur_time());
+}
+
+void Splash_DecodeJPEG(unsigned long u32InAddr, unsigned long u32OutAddr, unsigned char u8JPG_Idx)
+{
+	//Decoding JPEG
+	u32InAddr |= 0xA0000000;
+	u32OutAddr |= 0xA0000000;
+	DecodeJPEG( u32InAddr, u32OutAddr, u8JPG_Idx);
+}
+
+void Splash_SetGwin(int x, int y, int width, int height, unsigned char u8GWinIdx)
+{
+	_Gwin_info[u8GWinIdx].u8GwinID = u8GWinIdx;
+	_Gwin_info[u8GWinIdx].u32X = x;
+	_Gwin_info[u8GWinIdx].u32Y = y;
+	_Gwin_info[u8GWinIdx].u32Width = width;
+	_Gwin_info[u8GWinIdx].u32Height = height;
+
+	BurstSetGWIN(x, y, width, height, u8GWinIdx);
+}
+
+
+//******************************************************************************/
+// This function performs integer division
+// parameter:
+//  u16x: numerator
+//  u16y: denominator
+//  nInterger: bit count of integer
+//  nFraction: bit count of fraction
+// return: a U32 value in s.nInteger.nFraction form
+//******************************************************************************/
+U32 lDivide2Fixed(U16 u16x, U16 u16y, U8 nInteger, U8 nFraction)
+{
+    U8  neg = 0;
+    U32 mask;
+    U32 u32x;
+    U32 u32y;
+
+    if (u16x & 0x8000)
+    {
+        u32x = 0xFFFF0000 | u16x;
+        u32x = ~u32x + 1; //convert to positive
+        neg++;
+    }
+    else
+    {
+        u32x = u16x;
+    }
+
+    if (u16y & 0x8000)
+    {
+        u32y = 0xFFFF0000 | u16y;
+        u32y = ~u32y + 1; //convert to positive
+        neg++;
+    }
+    else
+    {
+        u32y = u16y;
+    }
+
+    // start calculation
+    u32x = (u32x << nFraction) / u32y;
+    if (neg % 2)
+    {
+        u32x = ~u32x + 1;
+    }
+    // total bit number is: 1(s) + nInteger + nFraction
+    mask = (1 << (1 + nInteger + nFraction)) - 1;
+    u32x &= mask;
+
+    return u32x;
+}
+
+
+static void BufBurstYUV422(U16 u16X, U16 u16Y, U32 u32InAddr, U32 u32OutAddr, U8 u8GWinIdx, U8 u8JPG_Idx)
+{
+    int tt = 0;
+    U32 org_Width=1920,org_Height=1080,new_Width=1368,new_Height=768;
+    S32 s32Temp1, s32Temp2;
+    U32 u32Value,u32Value3, u32ValueFix = org_Width;
+
+	// 091125_KimTH_01: PDP boot logo 대응
+	if (Splash_GetHWoption(PANEL_RES_OPT_SEL) == PANEL_RES_XGA)
+	{
+		new_Width	= 1032;
+		new_Height	= 768;
+	}
+	
+	// cleare the rotate setting
+    SYS_REGOP( REG_GE_ROT ) &= ~0x3 ;
+
+	SYS_REGOP( REG_GE_ALPHA_CONST ) = 0xFF;
+
+	// Set color format --> source: YUV422, destination: ARGB8888
+	SYS_REGOP( REG_GE_FMT ) = 0x0E0E;
+
+    // Set source address
+    SYS_REGOP(REG_GE_SRC_BASE_L) = u32InAddr & 0xFFFF;
+    SYS_REGOP(REG_GE_SRC_BASE_H) = ((u32InAddr >> 16) & 0x0FFF);
+
+    // Set source pitch
+    SYS_REGOP(REG_GE_SRC_PITCH) =  org_Width*2;//jpegWidth[u8JPG_Idx] * 2;
+
+    // Set destination address
+    SYS_REGOP(REG_GE_DST_BASE_L) = u32OutAddr & 0xFFFF;
+    if (0x10000000 <= u32OutAddr)   // Check if in MIU1
+    {
+        SYS_REGOP(REG_GE_DST_BASE_H) = ((u32OutAddr >> 16) & 0x0FFF) | 0x8000;
+    }
+    else
+    {
+        SYS_REGOP(REG_GE_DST_BASE_H) = ((u32OutAddr >> 16) & 0x0FFF);
+    }
+
+    // Set destination pitch
+    SYS_REGOP(REG_GE_DST_PITCH) =  new_Width*2;//_Gwin_info[u8GWinIdx].u32Width * 2;//std_Width*2; //_Gwin_info[u8GWinIdx].u32Width * 2;
+
+	SYS_REGOP(REG_GE_CLIP_L) = 0;
+	SYS_REGOP(REG_GE_CLIP_R) = new_Width;//_Gwin_info[u8GWinIdx].u32Width;//std_Width;//_Gwin_info[u8GWinIdx].u32Width;
+	SYS_REGOP(REG_GE_CLIP_T) = 0;
+	SYS_REGOP(REG_GE_CLIP_B) = new_Height;//_Gwin_info[u8GWinIdx].u32Height;//std_Height;//_Gwin_info[u8GWinIdx].u32Height;
+
+    //-------------------------------------------------------------------
+    //          calculate scaling rate     (terry 20091019)
+    //-------------------------------------------------------------------
+
+		if (  new_Width < (org_Width >> 1) )
+			u32ValueFix = org_Width - 1;
+     u32Value = lDivide2Fixed(org_Width, new_Width, 5, 12);//<< 2 ; //sc
+     s32Temp1 = org_Width-new_Width;
+		s32Temp2 = 2* new_Width;
+		s32Temp1 = s32Temp1 % s32Temp2;
+        u32Value3 = lDivide2Fixed(s32Temp1, s32Temp2, 0, 12);// << 2; //sc
+
+	SYS_REGOP( REG_GE_BLT_SRC_DX ) = u32Value & 0xffff; //0x1000 ;   // not scaling
+	SYS_REGOP( REG_GE_BLT_DST_X_OFST ) =u32Value3;//&= ~(0x1FFF) ;
+
+		if ( new_Height < (org_Height >> 1) )
+			u32ValueFix = org_Height - 1;
+		else
+			u32ValueFix = org_Height;
+
+        u32Value = lDivide2Fixed(u32ValueFix, new_Height, 5, 12);// << 2 ; //sc
+
+		s32Temp1 = u32ValueFix - new_Height;
+		s32Temp2 = 2* new_Height;
+		s32Temp1 = s32Temp1 % s32Temp2;
+        u32Value3 = lDivide2Fixed(s32Temp1, s32Temp2, 0, 12);// << 2; //sc
+
+    	SYS_REGOP( REG_GE_BLT_SRC_DY ) = u32Value & 0xffff;//0x1000 ;
+    	SYS_REGOP( REG_GE_BLT_DST_Y_OFST ) =u32Value3;//&= ~(0x1FFF) ;
+
+	//--------------------------------------------------------------------
+
+	SYS_REGOP( REG_GE_PRIM_V0_X ) = u16X;                // Destination
+	SYS_REGOP( REG_GE_PRIM_V0_Y ) = u16Y;
+	SYS_REGOP( REG_GE_PRIM_V1_X ) = u16X + new_Width-1;//jpegWidth[u8JPG_Idx] - 1;
+	SYS_REGOP( REG_GE_PRIM_V1_Y ) = u16Y + new_Height-1;//jpegHeight[u8JPG_Idx] - 1;
+	SYS_REGOP( REG_GE_PRIM_V2_X ) = 0;                 // Source
+	SYS_REGOP( REG_GE_PRIM_V2_Y ) = 0;
+	SYS_REGOP( REG_GE_BLT_SRC_W ) = org_Width;//jpegWidth[u8JPG_Idx];
+	SYS_REGOP( REG_GE_BLT_SRC_H ) = org_Height;//jpegHeight[u8JPG_Idx];
+
+	SYS_REGOP( REG_GE_CFG ) = 0x11;
+	SYS_REGOP( REG_GE_CMD ) = 0x40;
+
+    while (((SYS_REGOP(REG_GE_STATUS)&0x01)))
+    {
+        tt++ ;
+        asm volatile
+        (
+            "nop;"
+        );
+        if( (tt&0xFFFF)==0 )
+        {
+            printk("[GE INFO] GE is busy\n");
+            break ;
+        }
+    }
+}
+
+
+
+
+void Splash_DrawToBltSrcBuf(int x, int y, unsigned int u32InAddr, BITBLT_BUF_INFO* pBltBuf, unsigned char u8JPG_Idx)
+{
+
+    if (pBltBuf->u32BufAddr >= 0xA0000000)
+    {
+        pBltBuf->u32BufAddr &= (~0xA0000000);
+    }
+    else if (pBltBuf->u32BufAddr >= 0x40000000 && pBltBuf->u32BufAddr < 0xA0000000)
+    {
+        pBltBuf->u32BufAddr &= (~0x40000000);
+        pBltBuf->u32BufAddr += 0x10000000;
+    }
+
+    // TODO: to call a similar function like, BurstYUV422 ( ).
+    // But this new function will not use _Gwin_info[u8GWinIdx].u32Width to set pitch.
+    // It will take pBltBuf->u16Width to set pitch
+    BurstYUV422(x, y, u32InAddr,pBltBuf->u32BufAddr , 1, u8JPG_Idx);
+
+
+}
+
+void Splash_BitBlt(BITBLT_BUF_INFO* pBltSrcBuf, BITBLT_BUF_INFO* pBltDstBuf, unsigned char u8GWinIdx)
+{
+
+   if (pBltDstBuf->u32BufAddr >= 0xA0000000)
+   {
+       pBltDstBuf->u32BufAddr &= (~0xA0000000);     // Transfer to MIU0 physical address for GE
+   }
+   else if (pBltDstBuf->u32BufAddr >= 0x40000000 && pBltDstBuf->u32BufAddr < 0xA0000000)
+   {
+       pBltDstBuf->u32BufAddr &= (~0x40000000);     // Transfer to MIU1 physical address for GE
+       pBltDstBuf->u32BufAddr += 0x10000000;
+   }
+
+   // TODO:  Do bitblt from pBltSrcBuf --> pBltDstBuf.  That is from 1920x1080 --> 1366x768
+   BufBurstYUV422(0, 0, pBltSrcBuf->u32BufAddr,pBltDstBuf->u32BufAddr , 1, 0);
+   BurstInitGWIN(pBltDstBuf->u32BufAddr, u8GWinIdx);
+}
+
+void Splash_DrawImage(int x, int y, unsigned long u32InAddr, unsigned long u32OutAddr, unsigned char u8GWinIdx, unsigned char u8JPG_Idx)
+{
+	//Draw images
+	if (u32OutAddr >= 0xA0000000)
+	{
+		u32OutAddr &= (~0xA0000000);
+	}
+	else if (u32OutAddr >= 0x40000000 && u32OutAddr < 0xA0000000)
+	{
+		u32OutAddr &= (~0x40000000);
+		u32OutAddr += 0x10000000;
+	}
+	BurstYUV422(x, y, u32InAddr, u32OutAddr, u8GWinIdx, u8JPG_Idx);
+	BurstInitGWIN(u32OutAddr, u8GWinIdx);
+
+}
+
+void Splash_HV_Inverse(U8 u8GWinIdx)
+{
+	U32 u32RegVal, u32Tmp;
+	U32 u32GWinRegOffset;
+
+	if (u8GWinIdx > 3) // We have GWIN 0, 1, 2, 3
+	return;
+
+	SYS_REGOP( REG_GOP_WR_ACK ) &= ~0xF;   // select GOP4G_0
+	SYS_REGOP( REG_GOP_WR_ACK ) |= u8GOP;  // select GOP bank
+
+	SYS_REGOP( REG_GOP_SOFT_RESET ) |= 0x3000;
+
+	// Calculate GWIN register base offset
+	u32GWinRegOffset = (0x20 * u8GWinIdx) * 4;
+
+	SYS_REGOP( REG_GOP_WR_ACK ) &= ~0xF; // select GOP4G_0
+	SYS_REGOP( REG_GOP_WR_ACK ) |= (u8GOP+1);  // select GOP bank
+
+	if (GOP4G_BANK != u8GOP)
+	{
+		//RBLK Size
+		u32Tmp = SYS_REGOP(u32GWinRegOffset+REG_GOP_GWIN0_VEND) -
+		SYS_REGOP(u32GWinRegOffset+REG_GOP_GWIN0_VSTR);
+		u32Tmp *= SYS_REGOP(u32GWinRegOffset+REG_GOP_DRAM_RBLK0_HSIZE);
+
+		//Get original RBLK
+		u32RegVal = SYS_REGOP(u32GWinRegOffset+REG_GOP_DRAM_RBLK0_STR_HI);
+		u32RegVal = u32RegVal << 16;
+		u32RegVal |= SYS_REGOP(u32GWinRegOffset+REG_GOP_DRAM_RBLK0_STR_LO);
+
+		u32RegVal += u32Tmp - 1;
+
+		//Set new RBLK
+		SYS_REGOP(u32GWinRegOffset+REG_GOP_DRAM_RBLK0_STR_HI) = HI16BIT(u32RegVal);
+		SYS_REGOP(u32GWinRegOffset+REG_GOP_DRAM_RBLK0_STR_LO) = LO16BIT(u32RegVal);
+	}
+	else
+	{
+		// RBLK Size
+		u32Tmp = SYS_REGOP(u32GWinRegOffset+REG_GOP_DRAM_RBLK0_SIZE_LO);
+		u32Tmp = u32Tmp << 16;
+		u32Tmp |= SYS_REGOP(u32GWinRegOffset+REG_GOP_DRAM_RBLK0_SIZE_HI);
+
+		u32Tmp -= SYS_REGOP(u32GWinRegOffset+REG_GOP_DRAM_RBLK0_HSIZE);
+
+		// Get original VSTR
+		u32RegVal = SYS_REGOP(u32GWinRegOffset+REG_GOP_DRAM_GWIN0_VSTR_HI);
+		u32RegVal = u32RegVal << 16;
+		u32RegVal |= SYS_REGOP(u32GWinRegOffset+REG_GOP_DRAM_GWIN0_VSTR_LO);
+
+		u32RegVal -= u32Tmp;
+
+		// Set new VSTR
+		SYS_REGOP(u32GWinRegOffset+REG_GOP_DRAM_GWIN0_VSTR_HI) = HI16BIT(u32RegVal);
+		SYS_REGOP(u32GWinRegOffset+REG_GOP_DRAM_GWIN0_VSTR_LO) = LO16BIT(u32RegVal);
+	}
+}
+// 091125_KimTH_01: PDP boot logo 대응
+U8 Splash_GetPDPResOpt(void)
+{
+	U8	nRetPDPRes = PANEL_RES_WXGA; //default
+	
+
+	if ((gToolOptionDB.nToolOption1.flags.eModelToolType >= TOOL_PK95)&&(gToolOptionDB.nToolOption1.flags.eModelToolType <= TOOL_PK25))
+	{
+		//printf("<<PDP-FHD>>\n ");
+		nRetPDPRes = PANEL_RES_FULL_HD;
+	}
+	else // PJ series (50inch->WXGA, 42inch->XGA)
+	{
+		if (gToolOptionDB.nToolOption1.flags.eModelInchType == INCH_50)
+		{
+			//printf("<<PDP-WXGA>>\n ");
+			nRetPDPRes = PANEL_RES_WXGA;
+		}
+		else if (gToolOptionDB.nToolOption1.flags.eModelInchType == INCH_42)
+		{
+			//printf("<<PDP-XGA>>\n");
+			nRetPDPRes = PANEL_RES_XGA;
+		}
+		else
+		{
+			nRetPDPRes = PANEL_RES_XGA;
+		}
+	}
+	
+	return nRetPDPRes;
+}
+
+
+U8 Splash_GetHWoption(HW_OPT_T option_mask)
+{
+
+	#define _MAX_NUM_OF_READ 3
+
+	U8			ret			= 0;
+	static U8	retMICOM	= 0xFF;
+	UINT8		u8hwoption;
+	static U8   retBootoption = 0xFF;
+	U8 i, u8retry;
+	U8 regVal[_MAX_NUM_OF_READ] = {0,};
+
+
+	/*
+	   <GP2 model option> T3(S7) Part
+	   OPTION0 [GPIO42][G19]	: FRC_OPT0
+	   OPTION1 [GPIO11][C5] 	: LVDS type  		(LOW: LVDS			, HIGH: Mini LVDS)
+	   OPTION2 [GPIO14][F7] 	: DDR size    		(LOW: DDR 256MB		, HIGH: DDR 512MB)
+	   OPTION3 [GPIO32][B6] 	: Panel Res.  		(LOW: HD(1366x768)	, HIGH: FHD(1920x1080)
+	   OPTION4 [GPIO184][E18] 	: FRC_OPT1
+	   OPTION5 [GPIO185][D18] 	: GIP OPTION		(LOW : NON-GIP 		, HIGH: GIP)
+
+	   FRC OPT0 	FRC OPT1
+	   LOW			LOW			: NO FRC
+	   LOW			HIGH		: URSA3 INTERNAL
+	   HIGH			LOW			: URSA3 EXTERNAL
+	   HIGH			HIGH		: LG FRC
+
+	<micom hw option>
+	0 : LCD
+	2 : PDP
+	*/
+
+	//[MICOM HW OPTION]
+	if(option_mask == MICOM_HW_OPT_SEL)
+	{		
+		if(retMICOM == 0xFF)
+		{
+			MICOM_GetHWoption(&u8hwoption);
+			retMICOM = (u8hwoption&0xff);
+		}
+		return retMICOM;
+	}
+
+	//중복 호출 삭제, 1st read시 최소 3번 이상 동일한지 check.
+	//1. all pad in 중복 
+	//2. PDP resolution EEPROM 중복 read -> 1번만 EEPROM read하게 함. 
+	if(retBootoption == 0xFF)
+	{
+		u8retry = 0;
+		// all pad in
+		MHal_GPIO_REG(0x101ea1) &= ~BIT7;//all pad in
+
+		for( i = 0; i < (3 * _MAX_NUM_OF_READ); i++ )
+		{
+			//FRC_OPT0
+			MHal_GPIO_REG(0x101e12) &= ~(BIT2|BIT1|BIT0); //gpio set
+			MHal_GPIO_REG(0x101e12) &= ~(BIT6|BIT5|BIT4); //gpio set
+			MHal_GPIO_REG(0x101edf) &= ~(BIT7);
+			MHal_GPIO_REG(0x101e5c) |= BIT6; //set as input
+			regVal[u8retry] = (MHal_GPIO_REG(0x101e50)&BIT6)? 0x80:0 ; //read
+
+			//FRC_OPT1
+			MHal_GPIO_REG(0x101ea2) |= (BIT6);	//gpio set
+			MHal_GPIO_REG(0x101e6f) |= (BIT2);	//set as input		
+			regVal[u8retry] |= (MHal_GPIO_REG(0x101e6b)&BIT2)? 0x40:0 ; //read
+
+			//LVDS_TYPE
+			// default configuration is GPIO
+			MHal_GPIO_REG(0x0e1e) |= BIT5; //set as input
+			regVal[u8retry] |= (MHal_GPIO_REG(0x0e22)&BIT5)? 0x20:0 ; // read LVDS support
+
+			//DDRSIZE
+			// default configuration is GPIO
+			MHal_GPIO_REG(0x0e1f) |= BIT0; //set as input
+			regVal[u8retry] |= (MHal_GPIO_REG(0x0e23)&BIT0)? 0x10:0; // read LVDS support
+
+			//PANEL_RES
+			if(!DDI_GetModelOption()) //LCD
+			{
+				MHal_GPIO_REG(0x1422) &= ~(BIT4|BIT3|BIT2|BIT1|BIT0);//set port sar1 --> gpio32
+				MHal_GPIO_REG(0x101e24) &= ~(BIT6|BIT5|BIT4);
+				MHal_GPIO_REG(0x101e07) &= ~(BIT2|BIT1|BIT0);
+				MHal_GPIO_REG(0x1423) |= BIT1; //set as input
+				regVal[u8retry] |= (MHal_GPIO_REG(0x1425)&BIT1)? 0x08: 0x04; // read LVDS support 
+			}
+			else //PDP
+			{
+				if(Splash_GetPDPResOpt() == PANEL_RES_XGA) 			regVal[u8retry] |= 0;
+				else if(Splash_GetPDPResOpt() == PANEL_RES_WXGA) 	regVal[u8retry] |= 0x04;
+				else if(Splash_GetPDPResOpt() == PANEL_RES_FULL_HD) regVal[u8retry] |= 0x08;
+			}
+
+			//GIP_OPT
+			MHal_GPIO_REG(0x101ea2)  |= (BIT6); //gpio set
+			MHal_GPIO_REG(0x101e6f)  |= (BIT3); // set as input
+			regVal[u8retry]	|= (MHal_GPIO_REG(0x101e6b)&BIT3)? 0x02:0; // read GIP Panel
+
+			//OLED_OPT
+			MHal_GPIO_REG(0x0e24) = 0xbe;
+			MHal_GPIO_REG(0x0e25) = 0xba;				
+			MHal_GPIO_REG(0x0e1e) |= BIT4; //set as input
+			regVal[u8retry]	|= (MHal_GPIO_REG(0x0e22)&BIT4)? 0x01:0; // read GIP Panel	
+
+			//printf("\n[balup] -- regVal = 0x%x\n", regVal[u8retry]);
+			
+			if(u8retry >= (_MAX_NUM_OF_READ - 1)) {  break; }
+			else
+			{
+				if((u8retry > 0) &&
+					(regVal[u8retry] != regVal[u8retry-1]))
+				{
+					u8retry = 0;
+				}
+				else
+				{
+					u8retry ++;
+				}
+			}			
+		}	
+		retBootoption = regVal[u8retry];
+	}
+
+
+	switch(option_mask)
+	{
+		case FRC_OPT_SEL:
+			ret = (retBootoption & 0x80)? 1:0; 
+			break;		
+		case FRC_OPT1_SEL:
+			//ret = (retBootoption & 0x40)? 1:0; 
+			 ret = 0;
+			break;
+		case LVDS_OPT_SEL:
+			ret = (retBootoption & 0x20)? 1:0; 
+			break;			
+		case PANEL_RES_OPT_SEL:
+			if(retBootoption & 0x08) 		ret = PANEL_RES_FULL_HD;
+			else if(retBootoption & 0x04)	ret = PANEL_RES_WXGA;
+			else 							ret = PANEL_RES_XGA;
+			break;
+		case GIP_OPT_SEL:
+			ret = (retBootoption & 0x02)? 1:0; 			
+			//ret = 1;	
+			break;
+		case OLED_SEL:
+			ret = (retBootoption & 0x01)? 1:0; 			
+			break;
+		default:
+			break;
+	}
+
+	return ret;
+
+}
+
+U8 Splash_MICOM_PanelOn(void)
+{
+	UINT8	panel_on;
+	UINT8	retry = 0;
+
+	do{
+		MICOM_TurnOnPanelOn();
+		mdelay(10);
+		MICOM_VerifyPanelOn(&panel_on);
+		retry++;
+		printf("          ==> panel_on =%d \n",panel_on);
+		printf("          ==> panel retry = %d  \n",retry);
+	}while( panel_on != 1 &&  retry < 3 );
+
+	if(!panel_on || retry >= 3)
+		printf("==> panel on is failed \n");
+
+	return 0;
+}
+
+U8 Splash_MICOM_InvOn(void)
+{
+	UINT8	inv_on;
+	UINT8	retry = 0;
+
+	do{
+		MICOM_TurnOnInv();
+		mdelay(10);
+		MICOM_VerifyInverterOn(&inv_on);
+		retry++;
+		printf("          ==> inv_on =%d \n",inv_on);
+		printf("          ==>  inv retry = %d  \n",retry);
+	}while( inv_on != 1 && retry < 3 );
+
+	if(!inv_on || retry >= 3)
+		printf("==> invert on is failed \n");
+
+	return 0;
+}
+
+U8 Splash_Print_HWopt(void)
+{
+	printf("       HW Option: MICOM_HW_OPT_SEL %d \n ", Splash_GetHWoption(MICOM_HW_OPT_SEL));
+	
+	if(Splash_GetHWoption(MICOM_HW_OPT_SEL))
+	{
+		printf("PDP, ");
+		switch(Splash_GetHWoption(PANEL_RES_OPT_SEL))
+		{
+			case 0:		{printf("XGA, ");		break;}
+			case 1:		{printf("HD, ");		break;}
+			case 2:		{printf("FHD, ");		break;}
+			default:	{printf("Unknown, ");	break;}			
+		}
+		(Splash_GetHWoption(DDRSIZE_OPT_SEL))?	(printf("512DDR "))	: (printf("256DDR "));
+	}
+	else
+	{
+	printf("       HW Option: MICOM_HW_OPT_SEL %d \n ", Splash_GetHWoption(OLED_SEL));
+	
+		if(!Splash_GetHWoption(OLED_SEL))
+		{
+			printf("LCD, ");
+			switch(Splash_GetHWoption(PANEL_RES_OPT_SEL))
+			{
+				case 0:		{printf("XGA, ");		break;}
+				case 1:		{printf("HD , ");		break;}
+				case 2:		{printf("FHD, ");		break;}
+				default:	{printf("Unknown, ");	break;}
+			}		
+			(Splash_GetHWoption(LVDS_OPT_SEL))? 	(printf("Mini-LVDS, ")) : (printf("LVDS, "));
+			(Splash_GetHWoption(DDRSIZE_OPT_SEL))?	(printf("512DDR, "))	: (printf("256DDR, "));
+			(Splash_GetHWoption(GIP_OPT_SEL))?		(printf("GIP Panel, ")) : (printf("Non-GIP Panel, "));
+
+			if	   (!(Splash_GetHWoption(FRC_OPT_SEL))	&& !(Splash_GetHWoption(FRC_OPT1_SEL))) 	printf("NO-FRC ");
+			else if((Splash_GetHWoption(FRC_OPT_SEL))	&& !(Splash_GetHWoption(FRC_OPT1_SEL))) 	printf("URSA3 Internal ");
+			else if((Splash_GetHWoption(FRC_OPT_SEL))	&&	(Splash_GetHWoption(FRC_OPT1_SEL))) 	printf("URSA3 External ");
+			else																					printf("PWIZ LG-FRC ");
+			
+		}
+		else
+		{
+			printf("OLED, ");
+			switch(Splash_GetHWoption(PANEL_RES_OPT_SEL))
+			{
+				case 0:		{printf("XGA, ");		break;}
+				case 1:		{printf("HD , ");		break;}
+				case 2:		{printf("FHD, ");		break;}
+				default:	{printf("Unknown, ");	break;}
+			}		
+			(Splash_GetHWoption(LVDS_OPT_SEL))? 	(printf("Mini-LVDS, ")) : (printf("LVDS, "));
+			(Splash_GetHWoption(DDRSIZE_OPT_SEL))?	(printf("512DDR, "))	: (printf("256DDR, "));
+			(Splash_GetHWoption(GIP_OPT_SEL))?		(printf("GIP Panel, ")) : (printf("Non-GIP Panel, "));
+
+			if	   (!(Splash_GetHWoption(FRC_OPT_SEL))	&& !(Splash_GetHWoption(FRC_OPT1_SEL))) 	printf("NO-FRC ");
+			else if((Splash_GetHWoption(FRC_OPT_SEL))	&& !(Splash_GetHWoption(FRC_OPT1_SEL))) 	printf("URSA3 Internal ");
+			else if((Splash_GetHWoption(FRC_OPT_SEL))	&&	(Splash_GetHWoption(FRC_OPT1_SEL))) 	printf("URSA3 External ");
+			else																					printf("PWIZ LG-FRC ");			
+		}
+					
+	}
+	
+	printf("\n");
+	return 0;
+}
+
+
+POWSEQ_TIME_t	S7_PowerSeq = {0};
+
+#if 0
+void PRINT_POWSEQ(void)
+{
+	printf("[POWSEQ] next_seq=0x%x, next_time=%d\n", S7_PowerSeq.next_seq, S7_PowerSeq.next_time);
+}
+#else
+#define	PRINT_POWSEQ()
+#endif
+
+
+void BG_PowerSeqTask(BGTASK_POWSEQ_FLAG eFlag)
+{
+	static int		bStartFlag	= FALSE;
+	static int		bEndFlag	= FALSE;
+
+	static PANEL_POWER_SEQ_T	pnlpwrseq;
+	static PANEL_PWM_T			pnlpwm;
+	static UINT32				curTime;
+	static UINT32				nvmData;
+	static UINT8				systype;
+
+	if (bEndFlag == TRUE)
+		return;
+	if (bStartFlag == TRUE && (get_cur_time() < S7_PowerSeq.next_time) && eFlag != BGTASK_END)
+		return;
+	if (bStartFlag == FALSE && eFlag != BGTASK_START)
+		return;
+
+	/*-----------------------------------------------------------------------
+	 * Semi-Background Multi-tasking for Power sequence.
+	 *
+	 * If you want to change power sequence at bootloader,
+	 * check & modify this function.
+	 *
+	 * Summary of GP2 power sequence.
+	 *
+	 * 1. LCD Panel ON
+	 * 2. PWM & Scaler REG init
+	 * 3. TCON
+	 * 4. MFC (FRC)
+	 * 5. Inverter ON
+	 *
+	 * by jjab@lge.com, 2009.10.27.
+	 *-----------------------------------------------------------------------*/
+
+	if (bStartFlag == FALSE && eFlag == BGTASK_START)
+	{
+		/*-----------------------------------------------
+		 * Here, Start point of power sequence.
+		 *-----------------------------------------------*/
+		 
+            	DDI_NVM_GetToolOpt();
+
+		// FRC RES GPIO init
+		MHal_GPIO_REG(0x101e24) &= ~(BIT6|BIT5|BIT4);
+		MHal_GPIO_REG(0x101e07) &= ~(BIT2|BIT1|BIT0);
+		MHal_GPIO_REG(0x101e5c) &= ~BIT3;
+		// FRC RES GPIO High
+		MHal_GPIO_REG(0x101e56) |= BIT3;
+
+		/*-----------------------------------------------
+		 * Read & initialize all power seq. values here...
+		 *-----------------------------------------------*/
+		DDI_NVM_Read(SYS_DB_BASE + (UINT32)&(gSysNvmDB.validMark) - (UINT32)&gSysNvmDB,
+					 sizeof(gSysNvmDB.validMark), (UINT8 *)&(nvmData));
+		if(nvmData != 0xffffffff)
+		{
+			DDI_NVM_Read(SYS_DB_BASE + (UINT32)&(gSysNvmDB.panelpowerseq) - (UINT32)&gSysNvmDB,
+						 sizeof(gSysNvmDB.panelpowerseq), (UINT8 *)&(pnlpwrseq));
+			DDI_NVM_Read(SYS_DB_BASE + (UINT32)&(gSysNvmDB.panelpwm) - (UINT32)&gSysNvmDB,
+						 sizeof(gSysNvmDB.panelpwm), (UINT8 *)&(pnlpwm));
+			DDI_NVM_Read(SYS_DB_BASE + (UINT32)&(gSysNvmDB.systemtype) - (UINT32)&gSysNvmDB,
+						 sizeof(gSysNvmDB.systemtype), (UINT8 *)&(systype));
+			printf("   -> NVM OK! panelPowOnToData=%d, dataToLampOn=%d pnlpwrseq.nRLOntoDimSig = %d\n", pnlpwrseq.panelPowOnToData, pnlpwrseq.dataToLampOn,pnlpwrseq.nRLOntoDimSig);
+		}
+		else
+		{
+			pnlpwrseq = gSysNvmDB.panelpowerseq;
+			pnlpwm = gSysNvmDB.panelpwm;
+			systype = gSysNvmDB.systemtype;
+			printf("   -> NVM invalid. Use default panelPowOnToData=%d, dataToLampOn=%d pnlpwrseq.nRLOntoDimSig=%d\n", pnlpwrseq.panelPowOnToData, pnlpwrseq.dataToLampOn,pnlpwrseq.nRLOntoDimSig);
+		}
+
+		/*-----------------------------------------------
+		 * 1. LCD Panel ON
+		 *-----------------------------------------------*/
+               if((gToolOptionDB.nToolOption1.flags.eModelModuleType != MODULE_AUO) &&
+                (gToolOptionDB.nToolOption1.flags.eModelModuleType != MODULE_CMO))
+		Splash_MICOM_PanelOn();
+
+              if((pnlpwrseq.nRLOntoDimSig*10) > 1000) pnlpwrseq.nRLOntoDimSig = 0;		/* 초기값은 10ms 단위로 설정하고, 실제 delay 함수 사용시 X10 할것 */
+              
+		SET_NEXT_POWSEQ(POWSEQ_PWM, pnlpwrseq.panelPowOnToData, S7_PowerSeq);
+		PRINT_POWSEQ();
+
+		printf("[%4d] ~%s: Panel ON (panelPowOnToData=%d, nRLOntoDimSig*10=%d)\n",
+				get_cur_time(), __FUNCTION__, pnlpwrseq.panelPowOnToData, pnlpwrseq.nRLOntoDimSig*10);
+
+		// FRC RES GPIO high
+		//MHal_GPIO_REG(0x101e56) |= BIT3;
+
+		//useless delay
+		//Splash_Print_HWopt();	
+
+		bStartFlag = TRUE;
+	}
+
+
+	/*-----------------------------------------------
+	 * 2. PWM & Scaler REG Init
+	 *-----------------------------------------------*/
+	CHECK_FORCED_DELAY(eFlag, curTime, S7_PowerSeq);
+	if (CHECK_POWSEQ(POWSEQ_PWM, S7_PowerSeq) && ( get_cur_time() > (pnlpwrseq.nRLOntoDimSig*10)))   /* 초기값은 10ms 단위로 설정하고, 실제 delay 함수 사용시 X10 할것 */
+	{	
+		printf("       systemtype= %d, pnlpwm.vbrBFreq50hz=%d , pnlpwm.vbrBFreq60hz = %d\n",
+				systype, pnlpwm.vbrBFreq50hz, pnlpwm.vbrBFreq60hz);
+
+		// FRC RES GPIO low
+		MHal_GPIO_REG(0x101e56) &= ~BIT3;
+		
+		/* PWM Init */
+		if (pnlpwm.vbrBFreq50hz == 0 ) pnlpwm.vbrBFreq50hz = 100;
+		if ( pnlpwm.vbrBFreq60hz == 0) pnlpwm.vbrBFreq60hz = 120;
+		if (systype)
+			DDI_PWM_Init(pnlpwm.vbrBFreq50hz);
+		else
+			DDI_PWM_Init(pnlpwm.vbrBFreq60hz);
+
+		/* PWM Init Control */
+		if (systype)
+			DDI_PQ_PWMInitContol(pnlpwm.vbrBFreq50hz);
+		else
+			DDI_PQ_PWMInitContol(pnlpwm.vbrBFreq60hz);
+
+
+		if (  (Splash_GetHWoption(PANEL_RES_OPT_SEL) == PANEL_RES_FULL_HD) &&	// FHD
+			((!Splash_GetHWoption(FRC_OPT_SEL)) && (!Splash_GetHWoption(FRC_OPT1_SEL))) &&	// NO-FRC
+			   Splash_GetHWoption(LVDS_OPT_SEL))	// Mini LVDS (TCON)
+		{
+			// PWM ~ TCON SOE/POL
+			SET_NEXT_POWSEQ(POWSEQ_SCALER_SOE_POL, pnlpwrseq.panelPowOnToData , S7_PowerSeq);
+			PRINT_POWSEQ();
+		}
+		else
+		{
+			// PWM ~ MFC --> No delay
+			// add 30ms delay between Ursa reset and init. by Mstar recommand
+			SET_NEXT_POWSEQ(POWSEQ_MFC, 30, S7_PowerSeq); // 0 -> 30. 20091124 jhpark1102
+			PRINT_POWSEQ();
+		}
+
+		/* Scaler REG Init*/
+		PowerSeq_Scaler();
+
+		printf("[%4d] ~%s: PWM & Scaler REG\n", get_cur_time(), __FUNCTION__);
+	}
+
+
+	/*-----------------------------------------------
+	 * 3. TCON
+	 *-----------------------------------------------*/
+	CHECK_FORCED_DELAY(eFlag, curTime, S7_PowerSeq);
+	if (CHECK_POWSEQ(POWSEQ_SCALER_SOE_POL, S7_PowerSeq))
+	{
+		/* TCON SOE/POL */
+		PowerSeq_TCON_SOE_POL();
+
+		/* SOE/POL ~ DPM/HCONV */
+		SET_NEXT_POWSEQ(POWSEQ_GPIO_DPM_HCONV,pnlpwrseq.SOEtoDPM , S7_PowerSeq);
+		PRINT_POWSEQ();
+
+		printf("[%4d] ~%s: SOE/POL\n", get_cur_time(), __FUNCTION__);
+	}
+
+
+	CHECK_FORCED_DELAY(eFlag, curTime, S7_PowerSeq);
+	if (CHECK_POWSEQ(POWSEQ_GPIO_DPM_HCONV, S7_PowerSeq))
+	{
+		/* GPIO DPM/HCONV */
+		PowerSeq_GPIO_DPM_HCONV();
+
+		/* DPM/HCONV ~ VDD EVEN/ODD */
+		SET_NEXT_POWSEQ(POWSEQ_SCALER_VDD_EVEN_ODD, pnlpwrseq.DPMtoVGH, S7_PowerSeq);
+		PRINT_POWSEQ();
+
+		printf("[%4d] ~%s: DPM/HCONV\n", get_cur_time(), __FUNCTION__);
+	}
+
+
+	CHECK_FORCED_DELAY(eFlag, curTime, S7_PowerSeq);
+	if (CHECK_POWSEQ(POWSEQ_SCALER_VDD_EVEN_ODD, S7_PowerSeq))
+	{
+		/* TCON VDD EVEN/ODD */
+		PowerSeq_TCON_VDD_EVEN_ODD();
+
+		/* VDD EVEN/ODD ~ VST */
+		SET_NEXT_POWSEQ(POWSEQ_SCALER_VST, pnlpwrseq.VGHtoVST, S7_PowerSeq);
+		PRINT_POWSEQ();
+
+		printf("[%4d] ~%s: VDD EVEN/ODD\n", get_cur_time(), __FUNCTION__);
+	}
+
+
+	CHECK_FORCED_DELAY(eFlag, curTime, S7_PowerSeq);
+	if (CHECK_POWSEQ(POWSEQ_SCALER_VST, S7_PowerSeq))
+	{
+		/* TCON VST */
+		PowerSeq_TCON_VST();
+
+		/* VST ~ GCLK */
+		SET_NEXT_POWSEQ(POWSEQ_SCALER_GCLK, pnlpwrseq.VSTtoGCLK , S7_PowerSeq);
+		PRINT_POWSEQ();
+
+		printf("[%4d] ~%s: VST\n", get_cur_time(), __FUNCTION__);
+	}
+
+
+	CHECK_FORCED_DELAY(eFlag, curTime, S7_PowerSeq);
+	if (CHECK_POWSEQ(POWSEQ_SCALER_GCLK, S7_PowerSeq))
+	{
+		/* TCON GCLK */
+		PowerSeq_TCON_GCLK();
+
+		/* GCLK ~ Inverter On */ //S7Tcon의 경우, PowerSeq_MFC() 수행 불필요함. 
+		SET_NEXT_POWSEQ(POWSEQ_INVERTER, (pnlpwrseq.dataToLampOn*10), S7_PowerSeq);		/* 초기값은 10ms 단위로 설정하고, 실제 delay 함수 사용시 X10 할것 */
+		PRINT_POWSEQ();
+
+		printf("[%4d] ~%s: GCLK\n", get_cur_time(), __FUNCTION__);
+	}
+
+
+	/*-----------------------------------------------
+	 * 4. MFC
+	 *-----------------------------------------------*/
+	CHECK_FORCED_DELAY(eFlag, curTime, S7_PowerSeq);
+	if (CHECK_POWSEQ(POWSEQ_MFC, S7_PowerSeq))
+	{
+		/* MFC Init. */
+		PowerSeq_MFC();
+
+		/* MFC ~ Inverter ON */
+		SET_NEXT_POWSEQ(POWSEQ_INVERTER, (pnlpwrseq.dataToLampOn*10), S7_PowerSeq);		/* 초기값은 10ms 단위로 설정하고, 실제 delay 함수 사용시 X10 할것 */
+		PRINT_POWSEQ();
+
+		printf("[%4d] ~%s: MFC (dataToLampOn*10=%d)\n", get_cur_time(), __FUNCTION__, (pnlpwrseq.dataToLampOn*10));
+	}
+
+
+	/*-----------------------------------------------
+	 * 5. Inverter  On
+	 * PWM InitControl <-> Inv. On delay 필요.
+	 *-----------------------------------------------*/
+	CHECK_FORCED_DELAY(eFlag, curTime, S7_PowerSeq);
+	if (CHECK_POWSEQ(POWSEQ_INVERTER, S7_PowerSeq))
+	{
+		printf(" ==> bMirrorMode = 0x%x\n", gToolOptionDB.nToolOption5.flags.bMirrorMode);
+		
+		/* Image Mirror */
+		if(gToolOptionDB.nToolOption5.flags.bMirrorMode)
+                {      
+			Splash_HV_Inverse(1);
+        		mdelay(100);
+              }
+		/* Set to Error out GPIO IN */
+	    MHal_GPIO_REG(0x101e24)	&= ~(BIT2|BIT1|BIT0);
+	    MHal_GPIO_REG(0x101e24)	&= ~(BIT6|BIT5|BIT4);
+		MHal_GPIO_REG(0x101e5c)	|= BIT5; //set as input
+
+		/* Inverter ON */
+		Splash_MICOM_InvOn();
+
+		printf("[%4d] ~%s: Inverter ON\n", get_cur_time(), __FUNCTION__);
+
+		bEndFlag = TRUE;
+	}
+}
+
+extern cmd_tbl_t __u_boot_cmd_cp2ram;
+extern int do_cp2ram (cmd_tbl_t *cmdtp, int flag, int argc, char *argv[]);
+
+void BootSplash (void)
+{
+	SPLASH_BMP_INFO_T	splash_bmp_info[9];
+	TIME_T				rtcTime;
+	ulong				dpoffset = IMG_LOADED_ADDR;
+	char				*argv1[7];
+	char				offset[16];
+    BITBLT_BUF_INFO stBltSrcBuf, stBltDstBuf;
+	
+
+	printf("\n[%4d] BootSplash Start\n", get_cur_time());
+
+	/*-----------------------------------------------
+	 * Start background task...
+	 *-----------------------------------------------*/
+	BG_PowerSeqTask(BGTASK_START);
+
+	/*-----------------------------------------------
+	 * Read "logo" partition of NAND flash.
+	 *-----------------------------------------------*/
+	sprintf(offset, "0x%x", (unsigned int)dpoffset);
+	argv1[0] = "cp2ram";
+	argv1[1] = "logo";
+	argv1[2] = offset;
+	do_cp2ram (&__u_boot_cmd_cp2ram, 0, 3, argv1);
+	BG_PowerSeqTask(BGTASK_CONT);
+
+	/*-----------------------------------------------
+	 * Get RTC time
+	 *-----------------------------------------------*/
+	MICOM_GetRTCTime(&rtcTime);
+	BG_PowerSeqTask(BGTASK_CONT);
+
+	Splash_SetGwin(0, 0, 1920, 1080,1);
+	BG_PowerSeqTask(BGTASK_CONT);
+
+	// Read jpeg image from NAND and decde those JPEG images
+	Splash_GetJpegInfo(SPLASH_BG_BOOTING_BMP, &splash_bmp_info[0], NULL);
+	Splash_DecodeJPEG(IMG_LOADED_ADDR+splash_bmp_info[0].offset, SPLASH_BG_BOOTING_BMP_ADDR, 0);
+	BG_PowerSeqTask(BGTASK_CONT);
+
+	Splash_GetJpegInfo(SPLASH_BG_GRAPHIC_BMP, &splash_bmp_info[1], NULL);
+	Splash_DecodeJPEG(IMG_LOADED_ADDR+splash_bmp_info[1].offset, SPLASH_BG_GRAPHIC_BMP_ADDR, 1);
+	BG_PowerSeqTask(BGTASK_CONT);
+
+	Splash_GetJpegInfo(SPLASH_LG_LOG_BMP, &splash_bmp_info[2], NULL);
+	Splash_DecodeJPEG(IMG_LOADED_ADDR+splash_bmp_info[2].offset, SPLASH_LG_LOG_BMP_ADDR, 2);
+	BG_PowerSeqTask(BGTASK_CONT);
+
+	Splash_GetJpegInfo(SPLASH_CLOCK_ICON_BMP, &splash_bmp_info[3], NULL);
+	Splash_DecodeJPEG(IMG_LOADED_ADDR+splash_bmp_info[3].offset, SPLASH_CLOCK_ICON_BMP_ADDR, 3);
+	BG_PowerSeqTask(BGTASK_CONT);
+
+	Splash_GetJpegInfo(SPLASH_TIME_COLON_BMP, &splash_bmp_info[4], NULL);
+	Splash_DecodeJPEG(IMG_LOADED_ADDR+splash_bmp_info[4].offset, SPLASH_TIME_COLON_BMP_ADDR, 4);
+	BG_PowerSeqTask(BGTASK_CONT);
+
+	Splash_GetJpegInfo(SPLASH_TIME_HH_BMP, &splash_bmp_info[5],&rtcTime);
+	Splash_DecodeJPEG(IMG_LOADED_ADDR+splash_bmp_info[5].offset, SPLASH_TIME_HH_BMP_ADDR, 5);
+	BG_PowerSeqTask(BGTASK_CONT);
+
+	Splash_GetJpegInfo(SPLASH_TIME_H_BMP, &splash_bmp_info[6], &rtcTime);
+	Splash_DecodeJPEG(IMG_LOADED_ADDR+splash_bmp_info[6].offset, SPLASH_TIME_H_BMP_ADDR, 6);
+	BG_PowerSeqTask(BGTASK_CONT);
+
+	Splash_GetJpegInfo(SPLASH_TIME_MM_BMP, &splash_bmp_info[7], &rtcTime);
+	Splash_DecodeJPEG(IMG_LOADED_ADDR+splash_bmp_info[7].offset, SPLASH_TIME_MM_BMP_ADDR, 7);
+	BG_PowerSeqTask(BGTASK_CONT);
+
+	Splash_GetJpegInfo(SPLASH_TIME_M_BMP, &splash_bmp_info[8], &rtcTime);
+	Splash_DecodeJPEG(IMG_LOADED_ADDR+splash_bmp_info[8].offset, SPLASH_TIME_M_BMP_ADDR, 8);
+	BG_PowerSeqTask(BGTASK_CONT);
+
+	// 091125_KimTH_01: PDP boot logo 대응
+	//Draw decoded images
+	if( Splash_GetHWoption(PANEL_RES_OPT_SEL) == PANEL_RES_FULL_HD)//#if (LOGO_1366 != 1) //(PANEL_TYPE == 1920)
+	{
+		SYS_REGOP(0x378<<2) |= 0x0200; // GE decides which MIU by itself
+		SYS_REGOP( REG_GE_EN) = 0x1 ; // Enable GE
+		BurstInitGOP();
+		
+		Splash_DrawImage(splash_bmp_info[0].xPos,splash_bmp_info[0].yPos,SPLASH_BG_BOOTING_BMP_ADDR,GOP_OUT_ADDR,1,0);
+		BG_PowerSeqTask(BGTASK_CONT);
+		Splash_DrawImage(splash_bmp_info[1].xPos,splash_bmp_info[1].yPos,SPLASH_BG_GRAPHIC_BMP_ADDR,GOP_OUT_ADDR,1,1);
+		BG_PowerSeqTask(BGTASK_CONT);
+		Splash_DrawImage(splash_bmp_info[2].xPos,splash_bmp_info[2].yPos,SPLASH_LG_LOG_BMP_ADDR,GOP_OUT_ADDR,1,2);
+		BG_PowerSeqTask(BGTASK_CONT);
+		Splash_DrawImage(splash_bmp_info[3].xPos,splash_bmp_info[3].yPos,SPLASH_CLOCK_ICON_BMP_ADDR,GOP_OUT_ADDR,1,3);
+		BG_PowerSeqTask(BGTASK_CONT);
+		Splash_DrawImage(splash_bmp_info[4].xPos,splash_bmp_info[4].yPos,SPLASH_TIME_COLON_BMP_ADDR,GOP_OUT_ADDR,1,4);
+		BG_PowerSeqTask(BGTASK_CONT);
+		Splash_DrawImage(splash_bmp_info[5].xPos,splash_bmp_info[5].yPos,SPLASH_TIME_HH_BMP_ADDR,GOP_OUT_ADDR,1,5);
+		BG_PowerSeqTask(BGTASK_CONT);
+		Splash_DrawImage(splash_bmp_info[6].xPos,splash_bmp_info[6].yPos,SPLASH_TIME_H_BMP_ADDR,GOP_OUT_ADDR,1,6);
+		BG_PowerSeqTask(BGTASK_CONT);
+		Splash_DrawImage(splash_bmp_info[7].xPos,splash_bmp_info[7].yPos,SPLASH_TIME_MM_BMP_ADDR,GOP_OUT_ADDR,1,7);
+		BG_PowerSeqTask(BGTASK_CONT);
+		Splash_DrawImage(splash_bmp_info[8].xPos,splash_bmp_info[8].yPos,SPLASH_TIME_M_BMP_ADDR,GOP_OUT_ADDR,1,8);
+		BG_PowerSeqTask(BGTASK_CONT);
+	}	
+	else
+	{
+	    stBltSrcBuf.u16Width = 1920;
+	    stBltSrcBuf.u16Height = 1080;
+	    stBltSrcBuf.u32BufAddr = SPLASH_BITBLT_BUF_ADDR;
+
+		// 091125_KimTH_01: PDP boot logo 대응
+		if (Splash_GetHWoption(PANEL_RES_OPT_SEL) == PANEL_RES_XGA)
+		{
+			stBltDstBuf.u16Width = 1032;
+			stBltDstBuf.u16Height = 768;
+		}
+		else
+		{
+			stBltDstBuf.u16Width = 1368;
+			stBltDstBuf.u16Height = 768;
+		}
+		stBltDstBuf.u32BufAddr = GOP_OUT_ADDR;
+
+		SYS_REGOP(0x378<<2) |= 0x0200; // GE decides which MIU by itself
+		SYS_REGOP( REG_GE_EN) = 0x1 ; // Enable GE
+		BurstInitGOP();
+
+	    Splash_DrawToBltSrcBuf(splash_bmp_info[0].xPos,splash_bmp_info[0].yPos,SPLASH_BG_BOOTING_BMP_ADDR, &stBltSrcBuf, 0);
+		BG_PowerSeqTask(BGTASK_CONT);
+	    Splash_DrawToBltSrcBuf(splash_bmp_info[1].xPos,splash_bmp_info[1].yPos,SPLASH_BG_GRAPHIC_BMP_ADDR, &stBltSrcBuf, 1);
+		BG_PowerSeqTask(BGTASK_CONT);
+	    Splash_DrawToBltSrcBuf(splash_bmp_info[2].xPos,splash_bmp_info[2].yPos,SPLASH_LG_LOG_BMP_ADDR, &stBltSrcBuf, 2);
+		BG_PowerSeqTask(BGTASK_CONT);
+	    Splash_DrawToBltSrcBuf(splash_bmp_info[3].xPos,splash_bmp_info[3].yPos,SPLASH_CLOCK_ICON_BMP_ADDR, &stBltSrcBuf, 3);
+		BG_PowerSeqTask(BGTASK_CONT);
+	    Splash_DrawToBltSrcBuf(splash_bmp_info[4].xPos,splash_bmp_info[4].yPos,SPLASH_TIME_COLON_BMP_ADDR, &stBltSrcBuf, 4);
+		BG_PowerSeqTask(BGTASK_CONT);
+		Splash_DrawToBltSrcBuf(splash_bmp_info[5].xPos,splash_bmp_info[5].yPos,SPLASH_TIME_HH_BMP_ADDR, &stBltSrcBuf, 5);
+		BG_PowerSeqTask(BGTASK_CONT);
+		Splash_DrawToBltSrcBuf(splash_bmp_info[6].xPos,splash_bmp_info[6].yPos,SPLASH_TIME_H_BMP_ADDR, &stBltSrcBuf, 6);
+		BG_PowerSeqTask(BGTASK_CONT);
+		Splash_DrawToBltSrcBuf(splash_bmp_info[7].xPos,splash_bmp_info[7].yPos,SPLASH_TIME_MM_BMP_ADDR, &stBltSrcBuf, 7);
+		BG_PowerSeqTask(BGTASK_CONT);
+		Splash_DrawToBltSrcBuf(splash_bmp_info[8].xPos,splash_bmp_info[8].yPos,SPLASH_TIME_M_BMP_ADDR, &stBltSrcBuf, 8);
+		BG_PowerSeqTask(BGTASK_CONT);
+
+		// 091125_KimTH_01: PDP boot logo 대응
+		if (Splash_GetHWoption(PANEL_RES_OPT_SEL) == PANEL_RES_XGA)
+		{
+			Splash_SetGwin(0, 0, 1032, 768, 1);
+		}
+		else
+		{
+			Splash_SetGwin(0, 0, 1368, 768, 1);
+		}		
+	    Splash_BitBlt(&stBltSrcBuf, &stBltDstBuf, 1);
+		BG_PowerSeqTask(BGTASK_CONT);
+	}
+	printf("[%4d] BootSplash End\n", get_cur_time());
+}
+
+void Splash_GetJpegInfo(SPLASH_BMP_TYPE_T bmpType, SPLASH_BMP_INFO_T *pSplashBmpInfo, void *argv )
+{
+	TIME_T *pTimeSt;
+	int time;
+
+	pTimeSt = (TIME_T*)argv;
+
+#if 1	 // Splash_GetHWoption(PANEL_RES_OPT_SEL)) //FHD //redcloud00@lge.com wxga
+	{
+		switch ( bmpType )
+		{
+			case SPLASH_BG_BOOTING_BMP:
+				pSplashBmpInfo->offset 	= BG_BACKGROUND_OFFSET;
+				pSplashBmpInfo->size	= BG_BACKGROUND_SIZE;
+				pSplashBmpInfo->xPos	= BG_BACKGROUND_X_POS;
+				pSplashBmpInfo->yPos	= BG_BACKGROUND_Y_POS;
+				break;
+			case SPLASH_BG_GRAPHIC_BMP:
+				pSplashBmpInfo->offset 	= BG_GRAPHIC_OFFSET;
+				pSplashBmpInfo->size	= BG_GRAPHIC_SIZE;
+				pSplashBmpInfo->xPos	= BG_GRAPHIC_X_POS;
+				pSplashBmpInfo->yPos	= BG_GRAPHIC_Y_POS;
+				break;
+			case SPLASH_LG_LOG_BMP:
+				pSplashBmpInfo->offset 	= BG_LOGO_OFFSET;
+				pSplashBmpInfo->size	= BG_LOGO_SIZE;
+				pSplashBmpInfo->xPos	= BG_LOGO_X_POS;
+				pSplashBmpInfo->yPos	= BG_LOGO_Y_POS;
+				break;
+			case SPLASH_CLOCK_ICON_BMP:
+				pSplashBmpInfo->offset	= CLOCK_ICON_OFFSET;
+				pSplashBmpInfo->size	= CLOCK_ICON_SIZE;
+				pSplashBmpInfo->xPos	= CLOCK_ICON_X_POS;
+				pSplashBmpInfo->yPos	= CLOCK_ICON_Y_POS;
+				break;
+			case SPLASH_TIME_HH_BMP:
+				//TODO get time here
+				if( pTimeSt->year == 0 || pTimeSt->month == 0 || pTimeSt->day == 0)
+				{
+					time = 0xff;
+				}
+				else
+				{
+					if( pTimeSt->hour == 24 )pTimeSt->hour = 0;
+					time = pTimeSt->hour/10;					
+				}
+				
+				if( time == 0 )
+				{
+					pSplashBmpInfo->offset 	= TIME_HH_00_OFFSET;
+					pSplashBmpInfo->size	= TIME_HH_00_SIZE;
+					pSplashBmpInfo->xPos	= TIME_HH_00_X_POS;
+					pSplashBmpInfo->yPos	= TIME_HH_00_Y_POS;
+				}
+				else if( time == 1 )
+				{
+					pSplashBmpInfo->offset 	= TIME_HH_10_OFFSET;
+					pSplashBmpInfo->size	= TIME_HH_10_SIZE;
+					pSplashBmpInfo->xPos	= TIME_HH_10_X_POS;
+					pSplashBmpInfo->yPos	= TIME_HH_10_Y_POS;
+				}
+				else if( time == 2 )
+				{
+					pSplashBmpInfo->offset 	= TIME_HH_20_OFFSET;
+					pSplashBmpInfo->size	= TIME_HH_20_SIZE;
+					pSplashBmpInfo->xPos	= TIME_HH_20_X_POS;
+					pSplashBmpInfo->yPos	= TIME_HH_20_Y_POS;
+				}
+				else if( time == 0xff )
+				{
+					pSplashBmpInfo->offset 	= INVALID_01_OFFSET;
+					pSplashBmpInfo->size	= INVALID_01_SIZE;
+					pSplashBmpInfo->xPos	= INVALID_01_X_POS;
+					pSplashBmpInfo->yPos	= INVALID_01_Y_POS;
+				}
+				else
+				{
+					pSplashBmpInfo->offset 	= TIME_HH_00_OFFSET;
+					pSplashBmpInfo->size	= TIME_HH_00_SIZE;
+					pSplashBmpInfo->xPos	= TIME_HH_00_X_POS;
+					pSplashBmpInfo->yPos	= TIME_HH_00_Y_POS;
+				}
+				break;
+			case SPLASH_TIME_H_BMP:
+				if( pTimeSt->year == 0 || pTimeSt->month == 0 || pTimeSt->day == 0)
+				{
+					time = 0xff;
+				}
+				else
+				{
+					if( pTimeSt->hour == 24 )pTimeSt->hour = 0;
+					time = pTimeSt->hour%10;
+				}
+				
+				if( time == 0 )
+				{
+					pSplashBmpInfo->offset 	= TIME_HH_0_OFFSET;
+					pSplashBmpInfo->size	= TIME_HH_0_SIZE;
+					pSplashBmpInfo->xPos	= TIME_HH_0_X_POS;
+					pSplashBmpInfo->yPos	= TIME_HH_0_Y_POS;
+				}
+				else if( time == 1 )
+				{
+					pSplashBmpInfo->offset 	= TIME_HH_1_OFFSET;
+					pSplashBmpInfo->size	= TIME_HH_1_SIZE;
+					pSplashBmpInfo->xPos	= TIME_HH_1_X_POS;
+					pSplashBmpInfo->yPos	= TIME_HH_1_Y_POS;
+				}
+				else if( time == 2 )
+				{
+					pSplashBmpInfo->offset 	= TIME_HH_2_OFFSET;
+					pSplashBmpInfo->size	= TIME_HH_2_SIZE;
+					pSplashBmpInfo->xPos	= TIME_HH_2_X_POS;
+					pSplashBmpInfo->yPos	= TIME_HH_2_Y_POS;
+				}
+				else if( time == 3 )
+				{
+					pSplashBmpInfo->offset 	= TIME_HH_3_OFFSET;
+					pSplashBmpInfo->size	= TIME_HH_3_SIZE;
+					pSplashBmpInfo->xPos	= TIME_HH_3_X_POS;
+					pSplashBmpInfo->yPos	= TIME_HH_3_Y_POS;
+				}
+				else if( time == 4 )
+				{
+					pSplashBmpInfo->offset 	= TIME_HH_4_OFFSET;
+					pSplashBmpInfo->size	= TIME_HH_4_SIZE;
+					pSplashBmpInfo->xPos	= TIME_HH_4_X_POS;
+					pSplashBmpInfo->yPos	= TIME_HH_4_Y_POS;
+				}
+				else if( time == 5 )
+				{
+					pSplashBmpInfo->offset 	= TIME_HH_5_OFFSET;
+					pSplashBmpInfo->size	= TIME_HH_5_SIZE;
+					pSplashBmpInfo->xPos	= TIME_HH_5_X_POS;
+					pSplashBmpInfo->yPos	= TIME_HH_5_Y_POS;
+				}
+				else if( time == 6 )
+				{
+					pSplashBmpInfo->offset 	= TIME_HH_6_OFFSET;
+					pSplashBmpInfo->size	= TIME_HH_6_SIZE;
+					pSplashBmpInfo->xPos	= TIME_HH_6_X_POS;
+					pSplashBmpInfo->yPos	= TIME_HH_6_Y_POS;
+				}
+				else if( time == 7 )
+				{
+					pSplashBmpInfo->offset 	= TIME_HH_7_OFFSET;
+					pSplashBmpInfo->size	= TIME_HH_7_SIZE;
+					pSplashBmpInfo->xPos	= TIME_HH_7_X_POS;
+					pSplashBmpInfo->yPos	= TIME_HH_7_Y_POS;
+				}
+				else if( time == 8 )
+				{
+					pSplashBmpInfo->offset 	= TIME_HH_8_OFFSET;
+					pSplashBmpInfo->size	= TIME_HH_8_SIZE;
+					pSplashBmpInfo->xPos	= TIME_HH_8_X_POS;
+					pSplashBmpInfo->yPos	= TIME_HH_8_Y_POS;
+				}
+				else if( time == 9 )
+				{
+					pSplashBmpInfo->offset 	= TIME_HH_9_OFFSET;
+					pSplashBmpInfo->size	= TIME_HH_9_SIZE;
+					pSplashBmpInfo->xPos	= TIME_HH_9_X_POS;
+					pSplashBmpInfo->yPos	= TIME_HH_9_Y_POS;
+				}
+				else if( time == 0xff )
+				{
+					pSplashBmpInfo->offset 	= INVALID_02_OFFSET;
+					pSplashBmpInfo->size	= INVALID_02_SIZE;
+					pSplashBmpInfo->xPos	= INVALID_02_X_POS;
+					pSplashBmpInfo->yPos	= INVALID_02_Y_POS;
+				}
+				else
+				{
+					pSplashBmpInfo->offset 	= TIME_HH_0_OFFSET;
+					pSplashBmpInfo->size	= TIME_HH_0_SIZE;
+					pSplashBmpInfo->xPos	= TIME_HH_0_X_POS;
+					pSplashBmpInfo->yPos	= TIME_HH_0_Y_POS;
+				}
+				break;
+			case SPLASH_TIME_COLON_BMP:
+				pSplashBmpInfo->offset	= TIME_COLON_OFFSET;
+				pSplashBmpInfo->size	= TIME_COLON_SIZE;
+				pSplashBmpInfo->xPos	= TIME_COLON_X_POS;
+				pSplashBmpInfo->yPos	= TIME_COLON_Y_POS;
+				break;
+			case SPLASH_TIME_MM_BMP:
+				if( pTimeSt->year == 0 || pTimeSt->month == 0 || pTimeSt->day == 0)
+				{
+					time = 0xff;
+				}
+				else
+				{
+					time = pTimeSt->minute/10;
+				}
+				
+				if( time == 0 )
+				{
+					pSplashBmpInfo->offset 	= TIME_MM_00_OFFSET;
+					pSplashBmpInfo->size	= TIME_MM_00_SIZE;
+					pSplashBmpInfo->xPos	= TIME_MM_00_X_POS;
+					pSplashBmpInfo->yPos	= TIME_MM_00_Y_POS;
+				}
+				else if( time == 1 )
+				{
+					pSplashBmpInfo->offset 	= TIME_MM_10_OFFSET;
+					pSplashBmpInfo->size	= TIME_MM_10_SIZE;
+					pSplashBmpInfo->xPos	= TIME_MM_10_X_POS;
+					pSplashBmpInfo->yPos	= TIME_MM_10_Y_POS;
+				}
+				else if( time == 2 )
+				{
+					pSplashBmpInfo->offset 	= TIME_MM_20_OFFSET;
+					pSplashBmpInfo->size	= TIME_MM_20_SIZE;
+					pSplashBmpInfo->xPos	= TIME_MM_20_X_POS;
+					pSplashBmpInfo->yPos	= TIME_MM_20_Y_POS;
+				}
+				else if( time == 3 )
+				{
+					pSplashBmpInfo->offset 	= TIME_MM_30_OFFSET;
+					pSplashBmpInfo->size	= TIME_MM_30_SIZE;
+					pSplashBmpInfo->xPos	= TIME_MM_30_X_POS;
+					pSplashBmpInfo->yPos	= TIME_MM_30_Y_POS;
+				}
+				else if( time == 4 )
+				{
+					pSplashBmpInfo->offset 	= TIME_MM_40_OFFSET;
+					pSplashBmpInfo->size	= TIME_MM_40_SIZE;
+					pSplashBmpInfo->xPos	= TIME_MM_40_X_POS;
+					pSplashBmpInfo->yPos	= TIME_MM_40_Y_POS;
+				}
+				else if( time == 5 )
+				{
+					pSplashBmpInfo->offset 	= TIME_MM_50_OFFSET;
+					pSplashBmpInfo->size	= TIME_MM_50_SIZE;
+					pSplashBmpInfo->xPos	= TIME_MM_50_X_POS;
+					pSplashBmpInfo->yPos	= TIME_MM_50_Y_POS;
+				}
+				else if( time == 0xff )
+				{
+					pSplashBmpInfo->offset 	= INVALID_03_OFFSET;
+					pSplashBmpInfo->size	= INVALID_03_SIZE;
+					pSplashBmpInfo->xPos	= INVALID_03_X_POS;
+					pSplashBmpInfo->yPos	= INVALID_03_Y_POS;
+				}
+				else
+				{
+					pSplashBmpInfo->offset 	= TIME_MM_00_OFFSET;
+					pSplashBmpInfo->size	= TIME_MM_00_SIZE;
+					pSplashBmpInfo->xPos	= TIME_MM_00_X_POS;
+					pSplashBmpInfo->yPos	= TIME_MM_00_Y_POS;
+				}
+				break;
+			case SPLASH_TIME_M_BMP:
+				if( pTimeSt->year == 0 || pTimeSt->month == 0 || pTimeSt->day == 0)
+				{
+					time = 0xff;
+				}
+				else
+				{
+					time = pTimeSt->minute%10;
+				}
+				
+				if( time == 0 )
+				{
+					pSplashBmpInfo->offset 	= TIME_MM_0_OFFSET;
+					pSplashBmpInfo->size	= TIME_MM_0_SIZE;
+					pSplashBmpInfo->xPos	= TIME_MM_0_X_POS;
+					pSplashBmpInfo->yPos	= TIME_MM_0_Y_POS;
+				}
+				else if( time == 1 )
+				{
+					pSplashBmpInfo->offset 	= TIME_MM_1_OFFSET;
+					pSplashBmpInfo->size	= TIME_MM_1_SIZE;
+					pSplashBmpInfo->xPos	= TIME_MM_1_X_POS;
+					pSplashBmpInfo->yPos	= TIME_MM_1_Y_POS;
+				}
+				else if( time == 2 )
+				{
+					pSplashBmpInfo->offset 	= TIME_MM_2_OFFSET;
+					pSplashBmpInfo->size	= TIME_MM_2_SIZE;
+					pSplashBmpInfo->xPos	= TIME_MM_2_X_POS;
+					pSplashBmpInfo->yPos	= TIME_MM_2_Y_POS;
+				}
+				else if( time == 3 )
+				{
+					pSplashBmpInfo->offset 	= TIME_MM_3_OFFSET;
+					pSplashBmpInfo->size	= TIME_MM_3_SIZE;
+					pSplashBmpInfo->xPos	= TIME_MM_3_X_POS;
+					pSplashBmpInfo->yPos	= TIME_MM_3_Y_POS;
+				}
+				else if( time == 4 )
+				{
+					pSplashBmpInfo->offset 	= TIME_MM_4_OFFSET;
+					pSplashBmpInfo->size	= TIME_MM_4_SIZE;
+					pSplashBmpInfo->xPos	= TIME_MM_4_X_POS;
+					pSplashBmpInfo->yPos	= TIME_MM_4_Y_POS;
+				}
+				else if( time == 5 )
+				{
+					pSplashBmpInfo->offset 	= TIME_MM_5_OFFSET;
+					pSplashBmpInfo->size	= TIME_MM_5_SIZE;
+					pSplashBmpInfo->xPos	= TIME_MM_5_X_POS;
+					pSplashBmpInfo->yPos	= TIME_MM_5_Y_POS;
+				}
+				else if( time == 6 )
+				{
+					pSplashBmpInfo->offset 	= TIME_MM_6_OFFSET;
+					pSplashBmpInfo->size	= TIME_MM_6_SIZE;
+					pSplashBmpInfo->xPos	= TIME_MM_6_X_POS;
+					pSplashBmpInfo->yPos	= TIME_MM_6_Y_POS;
+				}
+				else if( time == 7 )
+				{
+					pSplashBmpInfo->offset 	= TIME_MM_7_OFFSET;
+					pSplashBmpInfo->size	= TIME_MM_7_SIZE;
+					pSplashBmpInfo->xPos	= TIME_MM_7_X_POS;
+					pSplashBmpInfo->yPos	= TIME_MM_7_Y_POS;
+				}
+				else if( time == 8 )
+				{
+					pSplashBmpInfo->offset 	= TIME_MM_8_OFFSET;
+					pSplashBmpInfo->size	= TIME_MM_8_SIZE;
+					pSplashBmpInfo->xPos	= TIME_MM_8_X_POS;
+					pSplashBmpInfo->yPos	= TIME_MM_8_Y_POS;
+				}
+				else if( time == 9 )
+				{
+					pSplashBmpInfo->offset 	= TIME_MM_9_OFFSET;
+					pSplashBmpInfo->size	= TIME_MM_9_SIZE;
+					pSplashBmpInfo->xPos	= TIME_MM_9_X_POS;
+					pSplashBmpInfo->yPos	= TIME_MM_9_Y_POS;
+				}
+				else if( time == 0xff )
+				{
+					pSplashBmpInfo->offset 	= INVALID_04_OFFSET;
+					pSplashBmpInfo->size	= INVALID_04_SIZE;
+					pSplashBmpInfo->xPos	= INVALID_04_X_POS;
+					pSplashBmpInfo->yPos	= INVALID_04_Y_POS;
+				}
+				else
+				{
+					pSplashBmpInfo->offset 	= TIME_MM_0_OFFSET;
+					pSplashBmpInfo->size	= TIME_MM_0_SIZE;
+					pSplashBmpInfo->xPos	= TIME_MM_0_X_POS;
+					pSplashBmpInfo->yPos	= TIME_MM_0_Y_POS;
+				}
+				break;
+
+			default :
+
+				pSplashBmpInfo->offset	= 0;
+				pSplashBmpInfo->size	= 0;
+				pSplashBmpInfo->xPos	= 0;
+				pSplashBmpInfo->yPos	= 0;
+		}
+	}
+#else
+	{
+		switch ( bmpType )
+		{
+			case SPLASH_BG_BOOTING_BMP:
+				pSplashBmpInfo->offset 	= BG_BACKGROUND_WXGA_OFFSET;
+				pSplashBmpInfo->size	= BG_BACKGROUND_WXGA_SIZE;
+				pSplashBmpInfo->xPos	= BG_BACKGROUND_WXGA_X_POS;
+				pSplashBmpInfo->yPos	= BG_BACKGROUND_WXGA_Y_POS;
+				break;
+			case SPLASH_BG_GRAPHIC_BMP:
+				pSplashBmpInfo->offset 	= BG_GRAPHIC_WXGA_OFFSET;
+				pSplashBmpInfo->size	= BG_GRAPHIC_WXGA_SIZE;
+				pSplashBmpInfo->xPos	= BG_GRAPHIC_WXGA_X_POS;
+				pSplashBmpInfo->yPos	= BG_GRAPHIC_WXGA_Y_POS;
+				break;
+			case SPLASH_LG_LOG_BMP:
+				pSplashBmpInfo->offset 	= BG_LOGO_WXGA_OFFSET;
+				pSplashBmpInfo->size	= BG_LOGO_WXGA_SIZE;
+				pSplashBmpInfo->xPos	= BG_LOGO_WXGA_X_POS;
+				pSplashBmpInfo->yPos	= BG_LOGO_WXGA_Y_POS;
+				break;
+			case SPLASH_CLOCK_ICON_BMP:
+				pSplashBmpInfo->offset	= CLOCK_ICON_WXGA_OFFSET;
+				pSplashBmpInfo->size	= CLOCK_ICON_WXGA_SIZE;
+				pSplashBmpInfo->xPos	= CLOCK_ICON_WXGA_X_POS;
+				pSplashBmpInfo->yPos	= CLOCK_ICON_WXGA_Y_POS;
+				break;
+			case SPLASH_TIME_HH_BMP:
+				//TODO get time here
+				time = pTimeSt->hour/10;
+				if( time == 0 )
+				{
+					pSplashBmpInfo->offset 	= TIME_HH_00_WXGA_OFFSET;
+					pSplashBmpInfo->size	= TIME_HH_00_WXGA_SIZE;
+					pSplashBmpInfo->xPos	= TIME_HH_00_WXGA_X_POS;
+					pSplashBmpInfo->yPos	= TIME_HH_00_WXGA_Y_POS;
+				}
+				else if( time == 1 )
+				{
+					pSplashBmpInfo->offset 	= TIME_HH_10_WXGA_OFFSET;
+					pSplashBmpInfo->size	= TIME_HH_10_WXGA_SIZE;
+					pSplashBmpInfo->xPos	= TIME_HH_10_WXGA_X_POS;
+					pSplashBmpInfo->yPos	= TIME_HH_10_WXGA_Y_POS;
+				}
+				else if( time == 2 )
+				{
+					pSplashBmpInfo->offset 	= TIME_HH_20_WXGA_OFFSET;
+					pSplashBmpInfo->size	= TIME_HH_20_WXGA_SIZE;
+					pSplashBmpInfo->xPos	= TIME_HH_20_WXGA_X_POS;
+					pSplashBmpInfo->yPos	= TIME_HH_20_WXGA_Y_POS;
+				}
+				else
+				{
+					pSplashBmpInfo->offset 	= TIME_HH_00_WXGA_OFFSET;
+					pSplashBmpInfo->size	= TIME_HH_00_WXGA_SIZE;
+					pSplashBmpInfo->xPos	= TIME_HH_00_WXGA_X_POS;
+					pSplashBmpInfo->yPos	= TIME_HH_00_WXGA_Y_POS;
+				}
+				break;
+			case SPLASH_TIME_H_BMP:
+				time = pTimeSt->hour%10;
+				if( time == 0 )
+				{
+					pSplashBmpInfo->offset 	= TIME_HH_0_WXGA_OFFSET;
+					pSplashBmpInfo->size	= TIME_HH_0_WXGA_SIZE;
+					pSplashBmpInfo->xPos	= TIME_HH_0_WXGA_X_POS;
+					pSplashBmpInfo->yPos	= TIME_HH_0_WXGA_Y_POS;
+				}
+				else if( time == 1 )
+				{
+					pSplashBmpInfo->offset 	= TIME_HH_1_WXGA_OFFSET;
+					pSplashBmpInfo->size	= TIME_HH_1_WXGA_SIZE;
+					pSplashBmpInfo->xPos	= TIME_HH_1_WXGA_X_POS;
+					pSplashBmpInfo->yPos	= TIME_HH_1_WXGA_Y_POS;
+				}
+				else if( time == 2 )
+				{
+					pSplashBmpInfo->offset 	= TIME_HH_2_WXGA_OFFSET;
+					pSplashBmpInfo->size	= TIME_HH_2_WXGA_SIZE;
+					pSplashBmpInfo->xPos	= TIME_HH_2_WXGA_X_POS;
+					pSplashBmpInfo->yPos	= TIME_HH_2_WXGA_Y_POS;
+				}
+				else if( time == 3 )
+				{
+					pSplashBmpInfo->offset 	= TIME_HH_3_WXGA_OFFSET;
+					pSplashBmpInfo->size	= TIME_HH_3_WXGA_SIZE;
+					pSplashBmpInfo->xPos	= TIME_HH_3_WXGA_X_POS;
+					pSplashBmpInfo->yPos	= TIME_HH_3_WXGA_Y_POS;
+				}
+				else if( time == 4 )
+				{
+					pSplashBmpInfo->offset 	= TIME_HH_4_WXGA_OFFSET;
+					pSplashBmpInfo->size	= TIME_HH_4_WXGA_SIZE;
+					pSplashBmpInfo->xPos	= TIME_HH_4_WXGA_X_POS;
+					pSplashBmpInfo->yPos	= TIME_HH_4_WXGA_Y_POS;
+				}
+				else if( time == 5 )
+				{
+					pSplashBmpInfo->offset 	= TIME_HH_5_WXGA_OFFSET;
+					pSplashBmpInfo->size	= TIME_HH_5_WXGA_SIZE;
+					pSplashBmpInfo->xPos	= TIME_HH_5_WXGA_X_POS;
+					pSplashBmpInfo->yPos	= TIME_HH_5_WXGA_Y_POS;
+				}
+				else if( time == 6 )
+				{
+					pSplashBmpInfo->offset 	= TIME_HH_6_WXGA_OFFSET;
+					pSplashBmpInfo->size	= TIME_HH_6_WXGA_SIZE;
+					pSplashBmpInfo->xPos	= TIME_HH_6_WXGA_X_POS;
+					pSplashBmpInfo->yPos	= TIME_HH_6_WXGA_Y_POS;
+				}
+				else if( time == 7 )
+				{
+					pSplashBmpInfo->offset 	= TIME_HH_7_WXGA_OFFSET;
+					pSplashBmpInfo->size	= TIME_HH_7_WXGA_SIZE;
+					pSplashBmpInfo->xPos	= TIME_HH_7_WXGA_X_POS;
+					pSplashBmpInfo->yPos	= TIME_HH_7_WXGA_Y_POS;
+				}
+				else if( time == 8 )
+				{
+					pSplashBmpInfo->offset 	= TIME_HH_8_WXGA_OFFSET;
+					pSplashBmpInfo->size	= TIME_HH_8_WXGA_SIZE;
+					pSplashBmpInfo->xPos	= TIME_HH_8_WXGA_X_POS;
+					pSplashBmpInfo->yPos	= TIME_HH_8_WXGA_Y_POS;
+				}
+				else if( time == 9 )
+				{
+					pSplashBmpInfo->offset 	= TIME_HH_9_WXGA_OFFSET;
+					pSplashBmpInfo->size	= TIME_HH_9_WXGA_SIZE;
+					pSplashBmpInfo->xPos	= TIME_HH_9_WXGA_X_POS;
+					pSplashBmpInfo->yPos	= TIME_HH_9_WXGA_Y_POS;
+				}
+				else
+				{
+					pSplashBmpInfo->offset 	= TIME_HH_0_WXGA_OFFSET;
+					pSplashBmpInfo->size	= TIME_HH_0_WXGA_SIZE;
+					pSplashBmpInfo->xPos	= TIME_HH_0_WXGA_X_POS;
+					pSplashBmpInfo->yPos	= TIME_HH_0_WXGA_Y_POS;
+				}
+				break;
+			case SPLASH_TIME_COLON_BMP:
+				pSplashBmpInfo->offset	= TIME_COLON_WXGA_OFFSET;
+				pSplashBmpInfo->size	= TIME_COLON_WXGA_SIZE;
+				pSplashBmpInfo->xPos	= TIME_COLON_WXGA_X_POS;
+				pSplashBmpInfo->yPos	= TIME_COLON_WXGA_Y_POS;
+				break;
+			case SPLASH_TIME_MM_BMP:
+				time = pTimeSt->minute/10;
+				if( time == 0 )
+				{
+					pSplashBmpInfo->offset 	= TIME_MM_00_WXGA_OFFSET;
+					pSplashBmpInfo->size	= TIME_MM_00_WXGA_SIZE;
+					pSplashBmpInfo->xPos	= TIME_MM_00_WXGA_X_POS;
+					pSplashBmpInfo->yPos	= TIME_MM_00_WXGA_Y_POS;
+				}
+				else if( time == 1 )
+				{
+					pSplashBmpInfo->offset 	= TIME_MM_10_WXGA_OFFSET;
+					pSplashBmpInfo->size	= TIME_MM_10_WXGA_SIZE;
+					pSplashBmpInfo->xPos	= TIME_MM_10_WXGA_X_POS;
+					pSplashBmpInfo->yPos	= TIME_MM_10_WXGA_Y_POS;
+				}
+				else if( time == 2 )
+				{
+					pSplashBmpInfo->offset 	= TIME_MM_20_WXGA_OFFSET;
+					pSplashBmpInfo->size	= TIME_MM_20_WXGA_SIZE;
+					pSplashBmpInfo->xPos	= TIME_MM_20_WXGA_X_POS;
+					pSplashBmpInfo->yPos	= TIME_MM_20_WXGA_Y_POS;
+				}
+				else if( time == 3 )
+				{
+					pSplashBmpInfo->offset 	= TIME_MM_30_WXGA_OFFSET;
+					pSplashBmpInfo->size	= TIME_MM_30_WXGA_SIZE;
+					pSplashBmpInfo->xPos	= TIME_MM_30_WXGA_X_POS;
+					pSplashBmpInfo->yPos	= TIME_MM_30_WXGA_Y_POS;
+				}
+				else if( time == 4 )
+				{
+					pSplashBmpInfo->offset 	= TIME_MM_40_WXGA_OFFSET;
+					pSplashBmpInfo->size	= TIME_MM_40_WXGA_SIZE;
+					pSplashBmpInfo->xPos	= TIME_MM_40_WXGA_X_POS;
+					pSplashBmpInfo->yPos	= TIME_MM_40_WXGA_Y_POS;
+				}
+				else if( time == 5 )
+				{
+					pSplashBmpInfo->offset 	= TIME_MM_50_WXGA_OFFSET;
+					pSplashBmpInfo->size	= TIME_MM_50_WXGA_SIZE;
+					pSplashBmpInfo->xPos	= TIME_MM_50_WXGA_X_POS;
+					pSplashBmpInfo->yPos	= TIME_MM_50_WXGA_Y_POS;
+				}
+				else
+				{
+					pSplashBmpInfo->offset 	= TIME_MM_00_WXGA_OFFSET;
+					pSplashBmpInfo->size	= TIME_MM_00_WXGA_SIZE;
+					pSplashBmpInfo->xPos	= TIME_MM_00_WXGA_X_POS;
+					pSplashBmpInfo->yPos	= TIME_MM_00_WXGA_Y_POS;
+				}
+				break;
+			case SPLASH_TIME_M_BMP:
+				time = pTimeSt->minute%10;
+				if( time == 0 )
+				{
+					pSplashBmpInfo->offset 	= TIME_MM_0_WXGA_OFFSET;
+					pSplashBmpInfo->size	= TIME_MM_0_WXGA_SIZE;
+					pSplashBmpInfo->xPos	= TIME_MM_0_WXGA_X_POS;
+					pSplashBmpInfo->yPos	= TIME_MM_0_WXGA_Y_POS;
+				}
+				else if( time == 1 )
+				{
+					pSplashBmpInfo->offset 	= TIME_MM_1_WXGA_OFFSET;
+					pSplashBmpInfo->size	= TIME_MM_1_WXGA_SIZE;
+					pSplashBmpInfo->xPos	= TIME_MM_1_WXGA_X_POS;
+					pSplashBmpInfo->yPos	= TIME_MM_1_WXGA_Y_POS;
+				}
+				else if( time == 2 )
+				{
+					pSplashBmpInfo->offset 	= TIME_MM_2_WXGA_OFFSET;
+					pSplashBmpInfo->size	= TIME_MM_2_WXGA_SIZE;
+					pSplashBmpInfo->xPos	= TIME_MM_2_WXGA_X_POS;
+					pSplashBmpInfo->yPos	= TIME_MM_2_WXGA_Y_POS;
+				}
+				else if( time == 3 )
+				{
+					pSplashBmpInfo->offset 	= TIME_MM_3_OFFSET;
+					pSplashBmpInfo->size	= TIME_MM_3_SIZE;
+					pSplashBmpInfo->xPos	= TIME_MM_3_X_POS;
+					pSplashBmpInfo->yPos	= TIME_MM_3_Y_POS;
+				}
+				else if( time == 4 )
+				{
+					pSplashBmpInfo->offset 	= TIME_MM_4_WXGA_OFFSET;
+					pSplashBmpInfo->size	= TIME_MM_4_WXGA_SIZE;
+					pSplashBmpInfo->xPos	= TIME_MM_4_WXGA_X_POS;
+					pSplashBmpInfo->yPos	= TIME_MM_4_WXGA_Y_POS;
+				}
+				else if( time == 5 )
+				{
+					pSplashBmpInfo->offset 	= TIME_MM_5_WXGA_OFFSET;
+					pSplashBmpInfo->size	= TIME_MM_5_WXGA_SIZE;
+					pSplashBmpInfo->xPos	= TIME_MM_5_WXGA_X_POS;
+					pSplashBmpInfo->yPos	= TIME_MM_5_WXGA_Y_POS;
+				}
+				else if( time == 6 )
+				{
+					pSplashBmpInfo->offset 	= TIME_MM_6_WXGA_OFFSET;
+					pSplashBmpInfo->size	= TIME_MM_6_WXGA_SIZE;
+					pSplashBmpInfo->xPos	= TIME_MM_6_WXGA_X_POS;
+					pSplashBmpInfo->yPos	= TIME_MM_6_WXGA_Y_POS;
+				}
+				else if( time == 7 )
+				{
+					pSplashBmpInfo->offset 	= TIME_MM_7_WXGA_OFFSET;
+					pSplashBmpInfo->size	= TIME_MM_7_WXGA_SIZE;
+					pSplashBmpInfo->xPos	= TIME_MM_7_WXGA_X_POS;
+					pSplashBmpInfo->yPos	= TIME_MM_7_WXGA_Y_POS;
+				}
+				else if( time == 8 )
+				{
+					pSplashBmpInfo->offset 	= TIME_MM_8_WXGA_OFFSET;
+					pSplashBmpInfo->size	= TIME_MM_8_WXGA_SIZE;
+					pSplashBmpInfo->xPos	= TIME_MM_8_WXGA_X_POS;
+					pSplashBmpInfo->yPos	= TIME_MM_8_WXGA_Y_POS;
+				}
+				else if( time == 9 )
+				{
+					pSplashBmpInfo->offset 	= TIME_MM_9_WXGA_OFFSET;
+					pSplashBmpInfo->size	= TIME_MM_9_WXGA_SIZE;
+					pSplashBmpInfo->xPos	= TIME_MM_9_WXGA_X_POS;
+					pSplashBmpInfo->yPos	= TIME_MM_9_WXGA_Y_POS;
+				}
+				else
+				{
+					pSplashBmpInfo->offset 	= TIME_MM_0_WXGA_OFFSET;
+					pSplashBmpInfo->size	= TIME_MM_0_WXGA_SIZE;
+					pSplashBmpInfo->xPos	= TIME_MM_0_WXGA_X_POS;
+					pSplashBmpInfo->yPos	= TIME_MM_0_WXGA_Y_POS;
+				}
+				break;
+
+			default :
+
+				pSplashBmpInfo->offset	= 0;
+				pSplashBmpInfo->size	= 0;
+				pSplashBmpInfo->xPos	= 0;
+				pSplashBmpInfo->yPos	= 0;
+		}
+
+	}
+#endif
+}
+
+int do_dplogo(cmd_tbl_t *cmdtp, int flag, int argc, char *argv[])
+{
+	if (argc > 1) {
+		printf ("Usage:\n%s\n", cmdtp->usage);
+		return -1;
+	}
+
+	BootSplash();
+
+	return 0;
+}
+
+U_BOOT_CMD(
+		dplogo,	2,	0,	do_dplogo,
+		"dplogo\t- display logo picture during bootloader\n",
+		"dplogo [offset] \n"
+		);

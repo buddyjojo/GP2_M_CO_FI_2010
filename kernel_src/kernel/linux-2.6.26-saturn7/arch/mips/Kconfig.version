@@ -1,0 +1,6 @@
+config VALID_KERNEL
+	string "Default Valid kernel Version"
+	default "1.00.00"
+	help
+		Determine valid kernel version. If this kernel version is not matched with
+		version which application have, application will not be run.

@@ -1,0 +1,9 @@
+config MSTAR_M4VE
+
+tristate "M4VE"
+	# dhjung LGE
+	depends on MSTAR_DRIVER
+	select CRC32
+	# dhjung LGE
+	default n
+	help

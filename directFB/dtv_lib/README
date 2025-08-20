@@ -1,0 +1,4 @@
+How to install:
+Copy librpc4dtv.so* to /usr/local/lib
+Copy ddi_gpu*.h to /usr/local/include
+Copy libdirectfb_gpuddi.so to /usr/local/lib/directfb-1.2-0/gfxdrivers

@@ -1,0 +1,9 @@
+config MSTAR_MSMAILBOX
+
+tristate "MSMAILBOX"
+	# dhjung LGE
+	depends on MSTAR_DRIVER
+	# dhjung LGE
+	default n
+	help
+    	enable MStar MAILBOX driver.
